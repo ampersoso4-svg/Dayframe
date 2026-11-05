@@ -1,5 +1,6 @@
 ﻿import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } from './config.js';
+import { clock as scheduleClock, dateAfter as scheduleDateAfter, dayOfWeek as scheduleDayOfWeek, findAvailableSlot, minutesAt as scheduleMinutesAt, workingIntervals as getWorkingIntervals, workoutGuidance as getWorkoutGuidance } from './scheduling.mjs';
 
 const $ = (id) => document.getElementById(id);
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -13,6 +14,8 @@ const workoutPlan = [
 
 let user = null;
 let records = { workouts: [], tasks: [], water: [], budgetEntries: [], monthlyBudget: null };
+let assistantHistory = [];
+let assistantPendingActions = [];
 const defaultWorkSchedule = { shift_mode: 'day', start_time: '09:00:00', end_time: '17:00:00', recovery_minutes: 60, working_days: [1, 2, 3, 4, 5] };
 let workSchedule = { ...defaultWorkSchedule, working_days: [...defaultWorkSchedule.working_days] };
 let refreshTimer = null;
@@ -30,71 +33,28 @@ const monday = () => {
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const timeLabel = (t) => t ? new Date(`2000-01-01T${t}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-const clock = (n) => `${String(Math.floor(n / 60) % 24).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const clock = scheduleClock;
 const plannedWorkout = (date) => workoutPlan.find((x) => x.dow === new Date(`${date}T12:00:00`).getDay());
 let rolloverInProgress = false;
 
 function dateAfter(date, days) {
-  const result = new Date(`${date}T12:00:00`);
-  result.setDate(result.getDate() + days);
-  return isoDate(result);
+  return scheduleDateAfter(date, days);
 }
 
 function minutesAt(time) {
-  return Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+  return scheduleMinutesAt(time);
 }
 
 function dayOfWeek(date) {
-  return new Date(`${date}T12:00:00`).getDay();
+  return scheduleDayOfWeek(date);
 }
 
 function workingIntervals(date) {
-  const start = minutesAt(workSchedule.start_time);
-  const end = minutesAt(workSchedule.end_time);
-  const workingDays = new Set((workSchedule.working_days || []).map(Number));
-
-  if (start < end) return workingDays.has(dayOfWeek(date)) ? [[start, end]] : [];
-
-  const intervals = [];
-  if (workingDays.has(dayOfWeek(date)) && start < 1440) intervals.push([start, 1440]);
-  if (end > 0 && workingDays.has(dayOfWeek(dateAfter(date, -1)))) intervals.push([0, end]);
-  return intervals.sort((a, b) => a[0] - b[0]);
+  return getWorkingIntervals(workSchedule, date);
 }
 
 function workoutGuidance(date) {
-  const shiftStart = minutesAt(workSchedule.start_time);
-  const shiftEnd = minutesAt(workSchedule.end_time);
-  const rest = Number(workSchedule.recovery_minutes) || 0;
-  const days = new Set((workSchedule.working_days || []).map(Number));
-  const weekday = dayOfWeek(date);
-  const previousWorkday = days.has(dayOfWeek(dateAfter(date, -1)));
-  let restUntil = null;
-  let workoutTime = '09:00';
-
-  if (shiftStart < shiftEnd && days.has(weekday)) {
-    restUntil = shiftEnd + rest;
-  } else if (shiftStart > shiftEnd && previousWorkday) {
-    restUntil = shiftEnd + rest;
-  } else if (shiftStart > shiftEnd && days.has(weekday)) {
-    return { workoutTime: '', restLabel: `WORK DUTY · next workout after ${timeLabel(clock(shiftEnd + rest))} tomorrow` };
-  }
-
-  if (restUntil !== null) {
-    if (restUntil >= 1440) return { workoutTime: '', restLabel: `REST · continue tomorrow ${clock(restUntil - 1440)}` };
-    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
-    if (date === today() && nowMinutes > restUntil) {
-      workoutTime = clock(Math.ceil(nowMinutes / 15) * 15);
-      return { workoutTime, restLabel: `Recovery complete · workout from ${timeLabel(workoutTime)}` };
-    }
-    workoutTime = clock(restUntil);
-    return { workoutTime, restLabel: `REST · workout after ${timeLabel(workoutTime)}` };
-  }
-
-  if (date === today()) {
-    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
-    if (nowMinutes > minutesAt(workoutTime)) workoutTime = clock(Math.ceil(nowMinutes / 15) * 15);
-  }
-  return { workoutTime, restLabel: '' };
+  return getWorkoutGuidance(workSchedule, date);
 }
 
 function taskStatus(task) {
@@ -108,6 +68,28 @@ function taskStatus(task) {
   return upcomingDates[0] <= dateAfter(currentDate, 7) ? 'soon' : 'upcoming';
 }
 
+function collapseDashboardDetails() {
+  const collapsibleTitles = new Set(['Progress tracking', 'Smart scheduling', 'Daily essentials', 'Reminder status', 'Data portability']);
+  document.querySelectorAll('#appView > .layout .panel').forEach((panel) => {
+    const heading = panel.querySelector(':scope > h2');
+    if (!heading || !collapsibleTitles.has(heading.textContent.trim())) return;
+
+    const children = [...panel.childNodes];
+    const details = document.createElement('details');
+    details.className = 'panel-fold';
+    const summary = document.createElement('summary');
+    summary.append(heading);
+    const content = document.createElement('div');
+    content.className = 'fold-content';
+    children.forEach((child) => {
+      if (child !== heading) content.append(child);
+    });
+    details.append(summary, content);
+    panel.classList.add('fold-panel');
+    panel.replaceChildren(details);
+  });
+}
+
 function mountBudgetPlanner() {
   if ($('budgetPanel')) return;
   const panel = document.createElement('section');
@@ -115,7 +97,9 @@ function mountBudgetPlanner() {
   panel.className = 'panel';
   panel.style.marginBottom = '14px';
   panel.innerHTML = `
-    <div class="row"><h2>Monthly budget</h2><span id="budgetMonthLabel" class="pill"></span></div>
+    <details class="panel-fold" id="budgetDetails" open>
+    <summary><span>Monthly budget</span><span id="budgetPeek" class="fold-peek"></span><span id="budgetMonthLabel" class="pill"></span></summary>
+    <div class="fold-content">
     <form id="budgetLimitForm" class="budget-limit-form">
       <div class="field"><label for="budgetLimit">Planned spending limit</label><input id="budgetLimit" type="number" min="0" step="0.01" required></div>
       <button type="submit">Save limit</button>
@@ -135,7 +119,8 @@ function mountBudgetPlanner() {
       </div>
       <button type="submit">Add budget entry</button><span id="budgetMessage" class="status" role="status"></span>
     </form>
-    <div id="budgetEntries" class="budget-entries"></div>`;
+    <div id="budgetEntries" class="budget-entries"></div>
+    </div></details>`;
 
   const monthPanel = $('monthGrid').closest('section');
   monthPanel.after(panel);
@@ -193,6 +178,7 @@ function renderBudget() {
   $('budgetRemaining').textContent = amountLabel(limit - spent);
   $('budgetRemaining').classList.toggle('over-budget', spent > limit);
   $('budgetIncome').textContent = amountLabel(income);
+  $('budgetPeek').textContent = `Remaining ${amountLabel(limit - spent)}`;
   $('budgetEntries').innerHTML = entries.slice().sort((a, b) => b.entry_date.localeCompare(a.entry_date) || b.created_at.localeCompare(a.created_at)).map((entry) => `
     <div class="budget-entry ${entry.entry_type}">
       <div><strong>${esc(entry.title)}</strong><small>${esc(entry.entry_date)} · ${esc(entry.category)}</small></div>
@@ -200,6 +186,163 @@ function renderBudget() {
       <button type="button" class="outline" data-delete-budget="${entry.id}" aria-label="Delete ${esc(entry.title)}">×</button>
     </div>`).join('') || '<p class="muted small">No entries for this month yet.</p>';
   if (records.budgetError) msg('budgetMessage', 'Budget tables are not available. Run the latest supabase/schema.sql in your Supabase project.');
+}
+
+function renderAssistantMessages() {
+  const container = $('assistantMessages');
+  container.replaceChildren();
+  for (const message of assistantHistory.slice(-10)) {
+    const bubble = document.createElement('p');
+    bubble.className = `assistant-message ${message.role}`;
+    bubble.textContent = message.content;
+    container.append(bubble);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderAssistantPreview() {
+  const container = $('assistantActions');
+  container.replaceChildren();
+  container.hidden = assistantPendingActions.length === 0;
+  $('assistantApply').hidden = assistantPendingActions.length === 0;
+  $('assistantDiscard').hidden = assistantPendingActions.length === 0;
+
+  for (const action of assistantPendingActions) {
+    const item = document.createElement('div');
+    item.className = 'assistant-action';
+    if (action.type === 'create_task') {
+      const date = action.task_date ? ` on ${action.task_date}` : ' (unscheduled)';
+      item.textContent = `Task: ${action.title}${date} · ${action.duration_minutes} min · priority ${action.priority}`;
+    } else {
+      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const workDays = action.working_days.map((day) => dayNames[day]).join(', ') || 'all days off';
+      item.textContent = `Work schedule: ${action.shift_mode} shift, ${action.start_time}–${action.end_time}, ${action.recovery_minutes} min recovery. Workdays: ${workDays}.`;
+    }
+    container.append(item);
+  }
+}
+
+function mountAssistant() {
+  if ($('assistantPanel')) return;
+  const panel = document.createElement('section');
+  panel.id = 'assistantPanel';
+  panel.className = 'panel assistant-panel';
+  panel.innerHTML = `
+    <div class="assistant-heading"><div><h2>Dayframe assistant</h2><p class="sub">Describe a task or the work hours you want to set.</p></div><span class="assistant-spark">AI</span></div>
+    <div id="assistantMessages" class="assistant-messages" role="log" aria-live="polite"><p class="assistant-message assistant">Hi. Tell me what you need to do, when it’s due, or how your work shift should change.</p></div>
+    <form id="assistantForm" class="assistant-form"><label class="visually-hidden" for="assistantPrompt">Message the Dayframe assistant</label><textarea id="assistantPrompt" rows="2" maxlength="2000" required placeholder="For example: Add a 45-minute grocery run tomorrow after 6 pm"></textarea><button id="assistantSend" type="submit">Ask</button></form>
+    <p id="assistantStatus" class="status" role="status" aria-live="polite"></p>
+    <div id="assistantActions" class="assistant-actions" hidden></div>
+    <div class="assistant-controls"><button id="assistantApply" type="button" hidden>Apply suggestions</button><button id="assistantDiscard" class="outline" type="button" hidden>Dismiss</button></div>`;
+  document.querySelector('#appView > .top').after(panel);
+
+  $('assistantForm').onsubmit = async (event) => {
+    event.preventDefault();
+    const prompt = $('assistantPrompt').value.trim();
+    if (!prompt || $('assistantSend').disabled) return;
+
+    assistantHistory.push({ role: 'user', content: prompt });
+    renderAssistantMessages();
+    $('assistantPrompt').value = '';
+    $('assistantSend').disabled = true;
+    msg('assistantStatus', 'Thinking…');
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error('Sign in to use the assistant.');
+      const response = await fetch('/.netlify/functions/assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({
+          messages: assistantHistory.slice(-10),
+          context: {
+            today: today(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            workSchedule
+          }
+        })
+      });
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        if (response.status === 404) {
+          throw new Error('The AI function is not running on this static server. Use your deployed Netlify site or start the app with Netlify Functions.');
+        }
+        throw new Error(`The AI function returned an unexpected response (HTTP ${response.status}).`);
+      }
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
+
+      assistantHistory.push({ role: 'assistant', content: result.message });
+      assistantPendingActions = result.actions;
+      renderAssistantMessages();
+      renderAssistantPreview();
+      msg('assistantStatus', assistantPendingActions.length ? 'Review these suggestions, then choose whether to apply them.' : 'No changes proposed.');
+    } catch (error) {
+      assistantHistory.push({ role: 'assistant', content: error.message || 'The assistant could not respond.' });
+      renderAssistantMessages();
+      msg('assistantStatus', error.message || 'The assistant could not respond.');
+    } finally {
+      $('assistantSend').disabled = false;
+    }
+  };
+
+  $('assistantApply').onclick = async () => {
+    let applied = 0;
+    for (const action of assistantPendingActions) {
+      try {
+        if (action.type === 'create_task') {
+          const { error } = await supabase.from('tasks').insert({
+            user_id: user.id,
+            title: action.title,
+            task_date: action.task_date,
+            due_date: action.due_date,
+            due_time: action.due_time,
+            duration_minutes: action.duration_minutes,
+            priority: action.priority,
+            is_fixed: action.is_fixed,
+            is_template: false,
+            completed: false
+          });
+          if (error) throw error;
+        } else {
+          const schedule = {
+            user_id: user.id,
+            shift_mode: action.shift_mode,
+            start_time: action.start_time,
+            end_time: action.end_time,
+            recovery_minutes: action.recovery_minutes,
+            working_days: action.working_days,
+            updated_at: new Date().toISOString()
+          };
+          const { error } = await supabase.from('work_schedules').upsert(schedule, { onConflict: 'user_id' });
+          if (error) throw error;
+          workSchedule = { ...schedule };
+          await syncWorkoutSchedule();
+          await autoPlanMonth(false);
+        }
+        applied += 1;
+      } catch (error) {
+        assistantPendingActions = assistantPendingActions.slice(applied);
+        renderAssistantPreview();
+        msg('assistantStatus', `${applied} suggestion(s) applied. Could not apply the rest: ${error.message}`);
+        await loadData();
+        return;
+      }
+    }
+
+    assistantPendingActions = [];
+    assistantHistory.push({ role: 'assistant', content: 'Done. I applied the suggestions you approved.' });
+    renderAssistantMessages();
+    renderAssistantPreview();
+    msg('assistantStatus', `${applied} suggestion(s) applied to your account.`);
+    await loadData();
+  };
+
+  $('assistantDiscard').onclick = () => {
+    assistantPendingActions = [];
+    renderAssistantPreview();
+    msg('assistantStatus', 'Suggestions dismissed; no changes were made.');
+  };
 }
 
 async function scheduleTasks(pending, { startDate, endDate, startAtNow = true } = {}) {
@@ -212,15 +355,7 @@ async function scheduleTasks(pending, { startDate, endDate, startAtNow = true } 
   };
   const findSlot = (date, duration, earliest = 0) => {
     const occupied = busy.get(date) || [];
-    for (const [windowStart, windowEnd] of workingIntervals(date)) {
-      const firstStart = Math.max(windowStart, earliest);
-      for (let start = firstStart; start + duration <= windowEnd; start += 15) {
-        if (!occupied.some(([otherStart, otherEnd]) => start < otherEnd && start + duration > otherStart)) {
-          return { date, start, end: start + duration };
-        }
-      }
-    }
-    return null;
+    return findAvailableSlot(workSchedule, date, duration, occupied, earliest);
   };
 
   for (const task of records.tasks) {
@@ -1079,6 +1214,8 @@ $('backupFile').onchange = async (e) => {
   }
 };
 
+collapseDashboardDetails();
+mountAssistant();
 mountBudgetPlanner();
 
 if ('serviceWorker' in navigator) {

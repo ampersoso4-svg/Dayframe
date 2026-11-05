@@ -34,6 +34,9 @@ This folder is a static site. Deploy it to Netlify, Vercel, Cloudflare Pages, or
 
 For local testing, serve `public/` over localhost (for example `npx serve public`). Service workers and push require HTTPS in production (localhost is allowed for development).
 
+## Tests
+Run `npm test` to verify the day/night shift intervals, days off, recovery guidance, and task-slot collision handling. Netlify runs this suite before generating the public Supabase config.
+
 ## 3. Push notification configuration
 The PWA can receive push messages. The UI subscription button registers the device subscription in Supabase. Actual scheduled delivery still requires a trusted server-side dispatcher:
 - Generate a VAPID public/private key pair.
@@ -68,3 +71,8 @@ For existing Supabase projects, run the updated `supabase/schema.sql` before dep
 Calendar tasks are highlighted as overdue, due today, coming soon, or completed. Unfinished movable tasks with a past work date are automatically shifted to the next available slot within the saved schedule. Fixed appointments are not shifted, deadlines are preserved, and all calendar tasks can be marked complete or reopened directly from their calendar entry.
 
 Select the plus button on a calendar date to create a task for that date. The budget planner stores a monthly spending limit and dated income/expense entries. Workout times follow the saved work shift and recovery buffer; changing the schedule updates unfinished workouts for the current week. The recovery label is an in-app visual reminder, not a push notification.
+
+## AI assistant setup
+The in-app assistant proposes task creations and work-schedule changes, then waits for the user to apply or dismiss them. It runs through the authenticated Netlify function at `/.netlify/functions/assistant`; the model key is never sent to the browser. Add `AI_API_KEY` to Netlify environment variables before deploying. Optionally set `AI_ENDPOINT` to an OpenAI-compatible chat-completions endpoint and `AI_MODEL` to a model available from that provider. Keep all provider keys in Netlify secrets, never in `public/config.js`.
+
+The plain Python static server does not run Netlify functions, so the assistant requires a deployed Netlify site or the Netlify CLI local function runtime. The assistant endpoint verifies the Supabase session and validates each proposed action; changes are written only after the user selects **Apply suggestions**.

@@ -1,6 +1,9 @@
 [build]
-  command = "node scripts/write-config.mjs"
+  command = "npm test && node scripts/write-config.mjs"
   publish = "public"
 
 [build.environment]
   NODE_VERSION = "20"
+
+[functions]
+  directory = "netlify/functions"
