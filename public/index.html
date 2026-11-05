@@ -22,6 +22,29 @@
 .mtask-delete{flex:none!important}
 .workout-actions{margin-top:5px}
 @media(max-width:600px){#editDialog{padding:16px}.item-actions{flex-wrap:wrap;justify-content:flex-end}}
+.task-legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 2px}
+.task-key{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+.task-key::before{content:"";width:8px;height:8px;border-radius:50%;background:#7a8880}
+.task-key.overdue::before{background:#b5473c}.task-key.today::before{background:#bd7812}.task-key.soon::before{background:#3178a8}.task-key.done::before{background:#347a53}
+.task-summary{margin:5px 0 10px;font-size:12px}
+.calendar-scroll{overflow-x:auto}
+.monthcell{max-height:210px;overflow:auto;align-content:start}
+.calendar-task{display:flex;align-items:center;gap:3px;min-width:0;margin-top:4px;padding:3px;border-left:3px solid #87928b;border-radius:4px;background:#f1f3f1}
+.calendar-task input{flex:0 0 14px;width:14px;height:14px;margin:0;accent-color:var(--green)}
+.calendar-task .mtask-open{flex:1;min-width:0}
+.calendar-task .task-badge{flex:none;border-radius:3px;padding:1px 3px;font-size:8px;line-height:1.2;white-space:nowrap}
+.calendar-task .mtask-delete{padding:1px 3px;font-size:10px}
+.calendar-task.task-overdue{border-color:#b5473c;background:#fff0ee;color:#762d27}
+.calendar-task.task-overdue .task-badge{background:#f4d2ce}
+.calendar-task.task-today{border-color:#bd7812;background:#fff5df;color:#75500d}
+.calendar-task.task-today .task-badge{background:#f5e3b9}
+.calendar-task.task-soon{border-color:#3178a8;background:#eaf4fb;color:#245a7d}
+.calendar-task.task-soon .task-badge{background:#d6eaf7}
+.calendar-task.task-upcoming{border-color:#87928b;background:#f1f3f1}
+.calendar-task.task-done{border-color:#347a53;background:#e8f3eb;color:#375646}
+.calendar-task.task-done .mtask-open{text-decoration:line-through;opacity:.8}
+.calendar-task.task-done .task-badge{background:#d5e8da}
+@media(max-width:700px){.calendar-scroll .monthhead,.calendar-scroll .monthgrid{min-width:700px}}
 </style>
 </head>
 <body>
@@ -30,7 +53,7 @@
 <main id="appView" class="hidden">
 <div class="top"><div><h1>Your week, made workable.</h1><p class="muted">Independent scheduling. Your data syncs through your own account.</p></div><div class="actions"><button class="secondary" id="enablePush">Enable reminders</button><button class="outline" id="signOut">Sign out</button></div></div>
 <div class="stats"><div class="stat"><strong id="workoutStat">0/5</strong><span>Workouts this week</span></div><div class="stat"><strong id="taskStat">0%</strong><span>Today's tasks done</span></div><div class="stat"><strong id="streakStat">0</strong><span>Workout streak</span></div><div class="stat"><strong id="waterStat">0</strong><span>Water check-ins</span></div></div>
-<section class="panel" style="margin-bottom:14px"><div class="row wrap"><div><h2 style="margin:0">Monthly work schedule</h2><p class="sub" style="margin:4px 0 0">Plan the whole month, balance workload, and keep fixed commitments in place.</p></div><div class="actions"><button class="secondary" id="monthPrev" type="button">‹</button><span class="pill" id="monthLabel"></span><button class="secondary" id="monthNext" type="button">›</button><button id="generateMonth" type="button">Auto-plan month</button></div></div><div class="monthhead"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div><div id="monthGrid" class="monthgrid"></div><p class="status" id="monthStatus">Default work window: weekdays, 09:00–17:00.</p></section><div class="layout"><div class="stack">
+<section class="panel" style="margin-bottom:14px"><div class="row wrap"><div><h2 style="margin:0">Monthly work schedule</h2><p class="sub" style="margin:4px 0 0">Plan the whole month, balance workload, and keep fixed commitments in place.</p></div><div class="actions"><button class="secondary" id="monthPrev" type="button">‹</button><span class="pill" id="monthLabel"></span><button class="secondary" id="monthNext" type="button">›</button><button id="generateMonth" type="button">Auto-plan month</button></div></div><div class="task-legend" aria-label="Task status legend"><span class="task-key overdue">Overdue</span><span class="task-key today">Due today</span><span class="task-key soon">Coming soon</span><span class="task-key done">Completed</span></div><p id="taskSummary" class="status task-summary" aria-live="polite"></p><div class="calendar-scroll"><div class="monthhead"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div><div id="monthGrid" class="monthgrid"></div></div><p class="status" id="monthStatus">Default work window: weekdays, 09:00–17:00.</p></section><div class="layout"><div class="stack">
 <section class="panel"><div class="row"><h2>Workout calendar</h2><span class="pill">45–60 min</span></div><p class="sub">Choose a start time to create a 15-minute advance reminder.</p><div id="week" class="week"></div></section>
 <section class="panel"><div class="row"><h2>Today's to-do list</h2><span id="taskCount" class="status"></span></div><div id="tasks"></div><form id="addTask"><div class="fields"><div class="field"><label>New work task</label><input id="taskText" required maxlength="160" placeholder="e.g. Finish project brief"></div><div class="field"><label>Deadline time (optional)</label><input id="taskTime" type="time"></div><div class="field"><label>Work date (optional)</label><input id="taskDate" type="date"></div><div class="field"><label>Deadline date (optional)</label><input id="taskDeadline" type="date"></div><div class="field"><label>Duration (minutes)</label><input id="taskDuration" type="number" min="15" step="15" value="60"></div><div class="field"><label>Priority</label><select id="taskPriority"><option value="1">High</option><option value="2" selected>Medium</option><option value="3">Low</option></select></div><div class="field"><label>Fixed appointment?</label><select id="taskFixed"><option value="false" selected>No</option><option value="true">Yes — don't move</option></select></div></div><button>Add task</button></form></section>
 <section class="panel"><h2>Progress tracking</h2><div class="row"><span>Weekly workout target</span><b id="workoutProgressText">0 / 5</b></div><div class="progress"><i id="workoutProgress"></i></div><div class="row" style="margin-top:13px"><span>Today's task completion</span><b id="taskProgressText">0%</b></div><div class="progress"><i id="taskProgress"></i></div><p class="status">Your records are saved to your account and sync when online.</p></section>

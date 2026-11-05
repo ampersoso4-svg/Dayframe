@@ -56,3 +56,6 @@ The planner is a deterministic time-slot suggestion tool, not an LLM integration
 
 ## Monthly scheduling update
 The monthly planner distributes unscheduled or movable incomplete tasks across weekdays (09:00–17:00), ordered by priority. Tasks marked as fixed appointments are not moved and reserve their duration on the assigned date. Tasks can be assigned a work date, duration, priority, and fixed status in the task form. The planner does not silently delete tasks; tasks that do not fit remain unscheduled and are reported.
+
+## Pending task handling
+Calendar tasks are highlighted as overdue, due today, coming soon, or completed. Unfinished movable tasks with a past work date are automatically shifted to the next available weekday slot between 09:00 and 17:00. Fixed appointments are not shifted, deadlines are preserved, and all calendar tasks can be marked complete or reopened directly from their calendar entry.

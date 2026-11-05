@@ -30,6 +30,95 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const timeLabel = (t) => t ? new Date(`2000-01-01T${t}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 const clock = (n) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
 const plannedWorkout = (date) => workoutPlan.find((x) => x.dow === new Date(`${date}T12:00:00`).getDay());
+let rolloverInProgress = false;
+
+function dateAfter(date, days) {
+  const result = new Date(`${date}T12:00:00`);
+  result.setDate(result.getDate() + days);
+  return isoDate(result);
+}
+
+function taskStatus(task) {
+  if (task.completed) return 'done';
+  const currentDate = today();
+  if ((task.task_date && task.task_date < currentDate) || (task.due_date && task.due_date < currentDate)) return 'overdue';
+  if (task.task_date === currentDate || task.due_date === currentDate) return 'today';
+
+  const upcomingDates = [task.task_date, task.due_date].filter((date) => date && date > currentDate).sort();
+  if (!upcomingDates.length) return 'unscheduled';
+  return upcomingDates[0] <= dateAfter(currentDate, 7) ? 'soon' : 'upcoming';
+}
+
+async function rollOverOverdueTasks() {
+  if (!user || rolloverInProgress) return { moved: 0, failed: 0 };
+  const pending = records.tasks
+    .filter((task) => !task.is_template && !task.completed && !task.is_fixed && task.task_date && task.task_date < today())
+    .sort((a, b) => (a.priority || 2) - (b.priority || 2) || (a.due_date || '9999').localeCompare(b.due_date || '9999'));
+  if (!pending.length) return { moved: 0, failed: 0 };
+
+  rolloverInProgress = true;
+  let moved = 0;
+  let failed = 0;
+  const busy = new Map();
+  const minutesFor = (value) => value ? Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5)) : 540;
+  const durationFor = (task) => Math.max(15, Number(task.duration_minutes) || 60);
+
+  for (const task of records.tasks) {
+    if (task.is_template || !task.task_date || task.task_date < today() || task.is_skipped) continue;
+    const start = minutesFor(task.due_time);
+    const end = start + durationFor(task);
+    if (start >= 1020 || end <= 540) continue;
+    if (!busy.has(task.task_date)) busy.set(task.task_date, []);
+    busy.get(task.task_date).push([start, end]);
+  }
+
+  const currentTime = new Date();
+  const currentMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
+
+  try {
+    for (const task of pending) {
+      const duration = durationFor(task);
+      let slot = null;
+
+      for (let offset = 0; offset < 90 && !slot; offset += 1) {
+        const date = dateAfter(today(), offset);
+        const weekday = new Date(`${date}T12:00:00`).getDay();
+        if (weekday === 0 || weekday === 6) continue;
+
+        const earliest = offset === 0 ? Math.max(540, Math.ceil(currentMinutes / 15) * 15) : 540;
+        const occupied = busy.get(date) || [];
+        for (let start = earliest; start + duration <= 1020; start += 15) {
+          if (!occupied.some(([otherStart, otherEnd]) => start < otherEnd && start + duration > otherStart)) {
+            slot = { date, start, end: start + duration };
+            break;
+          }
+        }
+      }
+
+      if (!slot) {
+        failed += 1;
+        continue;
+      }
+
+      const { error } = await supabase.from('tasks').update({ task_date: slot.date, due_time: clock(slot.start) }).eq('id', task.id).eq('user_id', user.id);
+      if (error) {
+        failed += 1;
+        console.error('Unable to roll over task:', error);
+        continue;
+      }
+
+      task.task_date = slot.date;
+      task.due_time = clock(slot.start);
+      if (!busy.has(slot.date)) busy.set(slot.date, []);
+      busy.get(slot.date).push([slot.start, slot.end]);
+      moved += 1;
+    }
+  } finally {
+    rolloverInProgress = false;
+  }
+
+  return { moved, failed };
+}
 
 function showEditor(kind, item, date) {
   $('editKind').value = kind;
@@ -203,7 +292,11 @@ async function loadData() {
       water: waterRes.data || []
     };
 
+    const rollover = await rollOverOverdueTasks();
     await render();
+    if (rollover.moved || rollover.failed) {
+      $('monthStatus').textContent = `${rollover.moved} unfinished task(s) moved to the next available weekday${rollover.failed ? `; ${rollover.failed} could not be moved` : ''}.`;
+    }
   } catch (error) {
     console.error(error);
     $('authMessage').textContent = error.message || 'Unable to load your schedule.';
@@ -246,9 +339,24 @@ function renderMonth() {
     const cell = document.createElement('div');
     cell.className = 'monthcell' + (date === today() ? ' today' : '');
     const items = records.tasks.filter((t) => !t.is_template && t.task_date === date);
-    cell.innerHTML = `<div class="date">${day}</div>` + items.slice(0, 4).map((t) => `<span class="mtask-row ${t.is_fixed ? 'mfixed' : ''}"><button type="button" class="mtask-open" data-edit-task="${t.id}" title="Edit ${esc(t.title)}">${t.is_fixed ? '◆ ' : ''}${esc(t.title)}</button><button type="button" class="outline mtask-delete" data-remove="${t.id}" aria-label="Delete ${esc(t.title)}" title="Delete task">×</button></span>`).join('') + (items.length > 4 ? `<small>+${items.length - 4} more</small>` : '');
+    const statusOrder = ['overdue', 'today', 'soon', 'upcoming', 'unscheduled', 'done'];
+    items.sort((a, b) => statusOrder.indexOf(taskStatus(a)) - statusOrder.indexOf(taskStatus(b)));
+    const taskRows = items.map((task) => {
+      const status = taskStatus(task);
+      const label = { overdue: 'Overdue', today: 'Today', soon: 'Soon', upcoming: 'Upcoming', unscheduled: 'Unscheduled', done: 'Done' }[status];
+      return `<div class="calendar-task task-${status} ${task.is_fixed ? 'mfixed' : ''}"><input type="checkbox" data-task="${task.id}" ${task.completed ? 'checked' : ''} aria-label="Mark ${esc(task.title)} ${task.completed ? 'not done' : 'done'}"><button type="button" class="mtask-open" data-edit-task="${task.id}" title="Edit ${esc(task.title)}">${task.is_fixed ? '◆ ' : ''}${esc(task.title)}</button><span class="task-badge">${label}</span><button type="button" class="outline mtask-delete" data-remove="${task.id}" aria-label="Delete ${esc(task.title)}" title="Delete task">×</button></div>`;
+    }).join('');
+    cell.innerHTML = `<div class="date">${day}</div>${taskRows}`;
     grid.append(cell);
   }
+
+  const openTasks = records.tasks.filter((task) => !task.is_template && !task.completed);
+  const counts = openTasks.reduce((result, task) => {
+    const status = taskStatus(task);
+    result[status] = (result[status] || 0) + 1;
+    return result;
+  }, {});
+  $('taskSummary').textContent = `${openTasks.length} open · ${counts.overdue || 0} overdue · ${counts.today || 0} due today · ${counts.soon || 0} coming soon · ${counts.unscheduled || 0} unscheduled`;
 }
 
 async function render() {
@@ -295,7 +403,7 @@ async function render() {
   }
   $('streakStat').textContent = streak;
 
-  const tasksForToday = records.tasks.filter((x) => x.is_template || x.task_date === today());
+  const tasksForToday = records.tasks.filter((x) => x.is_template || !x.task_date || x.task_date === today());
   const completed = tasksForToday.filter((x) => x.completed).length;
   const percent = tasksForToday.length ? Math.round((completed / tasksForToday.length) * 100) : 0;
   $('taskStat').textContent = `${percent}%`;
@@ -442,7 +550,12 @@ document.addEventListener('change', async (e) => {
   }
 
   if (e.target.dataset.task) {
-    await supabase.from('tasks').update({ completed: e.target.checked }).eq('id', e.target.dataset.task).eq('user_id', user.id);
+    const { error } = await supabase.from('tasks').update({ completed: e.target.checked }).eq('id', e.target.dataset.task).eq('user_id', user.id);
+    if (error) {
+      alert(error.message);
+      await loadData();
+      return;
+    }
     await loadData();
   }
 });
