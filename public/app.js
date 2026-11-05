@@ -73,11 +73,10 @@ function workoutGuidance(date) {
 
   if (shiftStart < shiftEnd && days.has(weekday)) {
     restUntil = shiftEnd + rest;
-  } else if (shiftStart > shiftEnd && shiftEnd > 0 && previousWorkday) {
+  } else if (shiftStart > shiftEnd && previousWorkday) {
     restUntil = shiftEnd + rest;
   } else if (shiftStart > shiftEnd && days.has(weekday)) {
-    workoutTime = clock(Math.max(0, Math.floor((shiftStart - 60) / 15) * 15));
-    return { workoutTime, restLabel: `Pre-shift workout · work starts ${timeLabel(workSchedule.start_time)}` };
+    return { workoutTime: '', restLabel: `WORK DUTY · next workout after ${timeLabel(clock(shiftEnd + rest))} tomorrow` };
   }
 
   if (restUntil !== null) {
@@ -139,7 +138,7 @@ function mountBudgetPlanner() {
     <div id="budgetEntries" class="budget-entries"></div>`;
 
   const monthPanel = $('monthGrid').closest('section');
-  monthPanel.parentElement.insertBefore(panel, monthPanel);
+  monthPanel.after(panel);
 
   $('budgetLimitForm').onsubmit = async (e) => {
     e.preventDefault();
@@ -200,6 +199,7 @@ function renderBudget() {
       <b>${entry.entry_type === 'income' ? '+' : '−'}${amountLabel(Number(entry.amount))}</b>
       <button type="button" class="outline" data-delete-budget="${entry.id}" aria-label="Delete ${esc(entry.title)}">×</button>
     </div>`).join('') || '<p class="muted small">No entries for this month yet.</p>';
+  if (records.budgetError) msg('budgetMessage', 'Budget tables are not available. Run the latest supabase/schema.sql in your Supabase project.');
 }
 
 async function scheduleTasks(pending, { startDate, endDate, startAtNow = true } = {}) {
@@ -508,23 +508,23 @@ async function loadData() {
   if (!user) return;
 
   try {
-    const [workoutsRes, tasksRes, waterRes, scheduleRes, budgetEntriesRes, monthlyBudgetRes] = await Promise.all([
+    const [workoutsRes, tasksRes, waterRes] = await Promise.all([
       supabase.from('workouts').select('*').eq('user_id', user.id).gte('workout_date', monthStart()).lte('workout_date', monthEnd()),
       supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at'),
-      supabase.from('water_logs').select('*').eq('user_id', user.id).eq('log_date', today()),
-      supabase.from('work_schedules').select('*').eq('user_id', user.id).maybeSingle(),
-      supabase.from('budget_entries').select('*').eq('user_id', user.id).gte('entry_date', monthStart()).lte('entry_date', monthEnd()),
-      supabase.from('monthly_budgets').select('*').eq('user_id', user.id).eq('budget_month', monthStart()).maybeSingle()
+      supabase.from('water_logs').select('*').eq('user_id', user.id).eq('log_date', today())
     ]);
 
     if (workoutsRes.error) throw workoutsRes.error;
     if (tasksRes.error) throw tasksRes.error;
     if (waterRes.error) throw waterRes.error;
-    if (scheduleRes.error) throw scheduleRes.error;
-    if (budgetEntriesRes.error) throw budgetEntriesRes.error;
-    if (monthlyBudgetRes.error) throw monthlyBudgetRes.error;
 
-    const savedSchedule = scheduleRes.data || defaultWorkSchedule;
+    const [scheduleRes, budgetEntriesRes, monthlyBudgetRes] = await Promise.all([
+      supabase.from('work_schedules').select('*').eq('user_id', user.id).maybeSingle(),
+      supabase.from('budget_entries').select('*').eq('user_id', user.id).gte('entry_date', monthStart()).lte('entry_date', monthEnd()),
+      supabase.from('monthly_budgets').select('*').eq('user_id', user.id).eq('budget_month', monthStart()).maybeSingle()
+    ]);
+
+    const savedSchedule = scheduleRes.error ? defaultWorkSchedule : (scheduleRes.data || defaultWorkSchedule);
     workSchedule = {
       shift_mode: savedSchedule.shift_mode || 'day',
       start_time: String(savedSchedule.start_time || defaultWorkSchedule.start_time).slice(0, 5),
@@ -537,11 +537,14 @@ async function loadData() {
       workouts: workoutsRes.data || [],
       tasks: tasksRes.data || [],
       water: waterRes.data || [],
-      budgetEntries: budgetEntriesRes.data || [],
-      monthlyBudget: monthlyBudgetRes.data || null
+      budgetEntries: budgetEntriesRes.error ? [] : (budgetEntriesRes.data || []),
+      monthlyBudget: monthlyBudgetRes.error ? null : monthlyBudgetRes.data || null,
+      budgetError: Boolean(budgetEntriesRes.error || monthlyBudgetRes.error),
+      scheduleError: scheduleRes.error || null
     };
 
     renderWorkSchedule();
+    if (scheduleRes.error) msg('workScheduleStatus', 'Work schedule settings unavailable. Run the latest supabase/schema.sql.');
     const rollover = await rollOverOverdueTasks();
     await render();
     if (rollover.moved || rollover.failed) {
