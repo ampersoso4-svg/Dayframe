@@ -416,7 +416,7 @@ function showAuth() {
 }
 
 function renderWorkSchedule() {
-  const scheduleFields = $('#workScheduleForm .fields');
+  const scheduleFields = document.querySelector('#workScheduleForm .fields');
   if (!$('recoveryMinutes')) {
     const recoveryField = document.createElement('div');
     recoveryField.className = 'field';
@@ -449,6 +449,8 @@ async function showApp() {
   $('authView')?.classList.add('hidden');
   $('appView')?.classList.remove('hidden');
   $('account').textContent = user?.email || 'Signed in';
+  renderMonth();
+  renderBudget();
   await loadData();
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = setInterval(() => loadData(), 60000);
@@ -553,6 +555,7 @@ async function loadData() {
   } catch (error) {
     console.error(error);
     $('authMessage').textContent = error.message || 'Unable to load your schedule.';
+    $('monthStatus').textContent = `Calendar data could not be loaded: ${error.message || 'check your Supabase setup.'}`;
   }
 }
 
