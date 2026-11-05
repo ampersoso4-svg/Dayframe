@@ -257,17 +257,23 @@ function showAuth() {
 }
 
 function renderWorkSchedule() {
+  const daysOffFieldset = document.querySelector('#workScheduleForm fieldset');
+  if (!daysOffFieldset.dataset.dayOffPicker) {
+    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    daysOffFieldset.innerHTML = `<legend>Choose your days off</legend><div class="weekday-options">${weekdays.map((day, index) => `<label><input type="checkbox" name="dayOff" value="${index}"> ${day}</label>`).join('')}</div>`;
+    daysOffFieldset.dataset.dayOffPicker = 'true';
+  }
   $('shiftMode').value = workSchedule.shift_mode;
   $('workStart').value = workSchedule.start_time.slice(0, 5);
   $('workEnd').value = workSchedule.end_time.slice(0, 5);
-  document.querySelectorAll('input[name="workingDay"]').forEach((input) => {
-    input.checked = (workSchedule.working_days || []).map(Number).includes(Number(input.value));
+  document.querySelectorAll('input[name="dayOff"]').forEach((input) => {
+    input.checked = !(workSchedule.working_days || []).map(Number).includes(Number(input.value));
   });
 
   const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const days = (workSchedule.working_days || []).map(Number).sort((a, b) => a - b).map((day) => weekdays[day]);
+  const daysOff = weekdays.filter((_day, index) => !(workSchedule.working_days || []).map(Number).includes(index));
   const mode = workSchedule.shift_mode === 'custom' ? 'Custom hours' : `${workSchedule.shift_mode[0].toUpperCase()}${workSchedule.shift_mode.slice(1)} shift`;
-  $('workScheduleStatus').textContent = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)} · ${days.length ? days.join(', ') : 'Every day off'}`;
+  $('workScheduleStatus').textContent = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)} · Days off: ${daysOff.length ? daysOff.join(', ') : 'none'}`;
   $('from').value = workSchedule.start_time.slice(0, 5);
   $('until').value = workSchedule.end_time.slice(0, 5);
 }
@@ -398,6 +404,11 @@ function renderMonth() {
   $('monthLabel').textContent = first.toLocaleDateString([], { month: 'long', year: 'numeric' });
   const grid = $('monthGrid');
   grid.innerHTML = '';
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const start = minutesAt(workSchedule.start_time);
+  const end = minutesAt(workSchedule.end_time);
+  const overnight = start > end;
+  const mode = workSchedule.shift_mode === 'custom' ? 'Custom shift' : `${workSchedule.shift_mode[0].toUpperCase()}${workSchedule.shift_mode.slice(1)} shift`;
 
   for (let i = 0; i < offset; i += 1) {
     const blank = document.createElement('div');
@@ -406,8 +417,15 @@ function renderMonth() {
 
   for (let day = 1; day <= days; day += 1) {
     const date = isoDate(new Date(y, m, day));
+    const activeIntervals = workingIntervals(date);
+    const startsShift = (workSchedule.working_days || []).map(Number).includes(dayOfWeek(date));
+    const carriesOvernight = overnight && end > 0 && (workSchedule.working_days || []).map(Number).includes(dayOfWeek(dateAfter(date, -1)));
     const cell = document.createElement('div');
-    cell.className = 'monthcell' + (date === today() ? ' today' : '');
+    cell.className = 'monthcell' + (date === today() ? ' today' : '') + (!activeIntervals.length ? ' day-off' : ' working-day');
+    let hoursLabel = 'Day off';
+    if (startsShift) hoursLabel = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)}${overnight ? ' +1 day' : ''}`;
+    else if (carriesOvernight) hoursLabel = `Night shift carryover · until ${timeLabel(workSchedule.end_time)}`;
+    else if (activeIntervals.length) hoursLabel = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)}`;
     const items = records.tasks.filter((t) => !t.is_template && t.task_date === date);
     const statusOrder = ['overdue', 'today', 'soon', 'upcoming', 'unscheduled', 'done'];
     items.sort((a, b) => statusOrder.indexOf(taskStatus(a)) - statusOrder.indexOf(taskStatus(b)));
@@ -416,7 +434,7 @@ function renderMonth() {
       const label = { overdue: 'Overdue', today: 'Today', soon: 'Soon', upcoming: 'Upcoming', unscheduled: 'Unscheduled', done: 'Done' }[status];
       return `<div class="calendar-task task-${status} ${task.is_fixed ? 'mfixed' : ''}"><input type="checkbox" data-task="${task.id}" ${task.completed ? 'checked' : ''} aria-label="Mark ${esc(task.title)} ${task.completed ? 'not done' : 'done'}"><button type="button" class="mtask-open" data-edit-task="${task.id}" title="Edit ${esc(task.title)}">${task.is_fixed ? '◆ ' : ''}${esc(task.title)}</button><span class="task-badge">${label}</span><button type="button" class="outline mtask-delete" data-remove="${task.id}" aria-label="Delete ${esc(task.title)}" title="Delete task">×</button></div>`;
     }).join('');
-    cell.innerHTML = `<div class="date">${day}</div>${taskRows}`;
+    cell.innerHTML = `<div class="date">${day} <span class="calendar-day-name">${weekdays[dayOfWeek(date)]}</span></div><div class="calendar-hours">${esc(hoursLabel)}</div>${taskRows}`;
     grid.append(cell);
   }
 
@@ -569,7 +587,7 @@ $('workScheduleForm').onsubmit = async (e) => {
     shift_mode: $('shiftMode').value,
     start_time: startTime,
     end_time: endTime,
-    working_days: [...document.querySelectorAll('input[name="workingDay"]:checked')].map((input) => Number(input.value)),
+    working_days: [...document.querySelectorAll('input[name="dayOff"]:not(:checked)')].map((input) => Number(input.value)),
     updated_at: new Date().toISOString()
   };
   const { error } = await supabase.from('work_schedules').upsert(schedule, { onConflict: 'user_id' });
