@@ -146,7 +146,11 @@ export default async function handler(request) {
     });
     if (!aiResponse.ok) {
       console.error('AI provider returned status', aiResponse.status);
-      return json({ error: 'The AI provider could not complete the request. Check the Netlify AI settings.' }, 502);
+      let reason = 'The AI provider could not complete the request.';
+      if ([401, 403].includes(aiResponse.status)) reason = 'The AI provider rejected the API key.';
+      else if (aiResponse.status === 404) reason = 'The AI model or endpoint was not found.';
+      else if (aiResponse.status === 429) reason = 'The AI provider rate limit or usage quota was reached.';
+      return json({ error: `${reason} (HTTP ${aiResponse.status}). Check AI_API_KEY, AI_ENDPOINT, AI_MODEL, and API billing.` }, 502);
     }
 
     const completion = await aiResponse.json();
