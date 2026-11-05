@@ -62,7 +62,9 @@ The planner is a deterministic time-slot suggestion tool, not an LLM integration
 ## Monthly scheduling update
 The monthly planner distributes unscheduled or movable incomplete tasks within the work hours and workdays saved for the account. Day, night, and custom shifts are supported, including shifts that cross midnight. Tasks are ordered by priority and deadline; fixed appointments are preserved. When a task is completed, remaining movable tasks are rescheduled from the current time. Tasks that do not fit remain unscheduled and are reported.
 
-For existing Supabase projects, run the updated `supabase/schema.sql` to add the per-user `work_schedules` table and its row-level security policy before deploying.
+For existing Supabase projects, run the updated `supabase/schema.sql` before deploying. It adds recovery settings, monthly budgets, and budget entries with row-level security.
 
 ## Pending task handling
 Calendar tasks are highlighted as overdue, due today, coming soon, or completed. Unfinished movable tasks with a past work date are automatically shifted to the next available slot within the saved schedule. Fixed appointments are not shifted, deadlines are preserved, and all calendar tasks can be marked complete or reopened directly from their calendar entry.
+
+Select the plus button on a calendar date to create a task for that date. The budget planner stores a monthly spending limit and dated income/expense entries. Workout times follow the saved work shift and recovery buffer; changing the schedule updates unfinished workouts for the current week. The recovery label is an in-app visual reminder, not a push notification.

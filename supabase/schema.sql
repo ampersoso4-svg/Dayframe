@@ -29,15 +29,36 @@ create table if not exists public.work_schedules (
  user_id uuid primary key references auth.users(id) on delete cascade,
  shift_mode text not null default 'day' check(shift_mode in ('day','night','custom')),
  start_time time not null default '09:00', end_time time not null default '17:00',
+ recovery_minutes integer not null default 60 check(recovery_minutes between 0 and 240),
  working_days integer[] not null default array[1,2,3,4,5]::integer[],
  updated_at timestamptz not null default now(),
  check(start_time <> end_time)
+);
+alter table public.work_schedules add column if not exists recovery_minutes integer not null default 60 check(recovery_minutes between 0 and 240);
+create table if not exists public.monthly_budgets (
+ user_id uuid not null references auth.users(id) on delete cascade,
+ budget_month date not null,
+ spending_limit numeric(12,2) not null default 0 check(spending_limit >= 0),
+ updated_at timestamptz not null default now(),
+ primary key(user_id,budget_month)
+);
+create table if not exists public.budget_entries (
+ id uuid primary key default gen_random_uuid(),
+ user_id uuid not null references auth.users(id) on delete cascade,
+ entry_date date not null default current_date,
+ title text not null,
+ category text not null default 'Other',
+ entry_type text not null check(entry_type in ('income','expense')),
+ amount numeric(12,2) not null check(amount > 0),
+ created_at timestamptz not null default now()
 );
 alter table public.workouts enable row level security;
 alter table public.tasks enable row level security;
 alter table public.water_logs enable row level security;
 alter table public.push_subscriptions enable row level security;
 alter table public.work_schedules enable row level security;
+alter table public.monthly_budgets enable row level security;
+alter table public.budget_entries enable row level security;
 drop policy if exists "own workouts" on public.workouts;
 create policy "own workouts" on public.workouts for all using (auth.uid()=user_id) with check(auth.uid()=user_id);
 drop policy if exists "own tasks" on public.tasks;
@@ -48,8 +69,13 @@ drop policy if exists "own push subscriptions" on public.push_subscriptions;
 create policy "own push subscriptions" on public.push_subscriptions for all using (auth.uid()=user_id) with check(auth.uid()=user_id);
 drop policy if exists "own work schedule" on public.work_schedules;
 create policy "own work schedule" on public.work_schedules for all using (auth.uid()=user_id) with check(auth.uid()=user_id);
+drop policy if exists "own monthly budgets" on public.monthly_budgets;
+create policy "own monthly budgets" on public.monthly_budgets for all using (auth.uid()=user_id) with check(auth.uid()=user_id);
+drop policy if exists "own budget entries" on public.budget_entries;
+create policy "own budget entries" on public.budget_entries for all using (auth.uid()=user_id) with check(auth.uid()=user_id);
 create index if not exists workouts_due_idx on public.workouts(remind_at) where reminder_sent_at is null;
 create index if not exists tasks_user_date_idx on public.tasks(user_id,task_date);
+create index if not exists budget_entries_user_date_idx on public.budget_entries(user_id,entry_date);
 
 -- Upgrade existing Dayframe installations safely.
 alter table public.tasks add column if not exists duration_minutes int not null default 60;

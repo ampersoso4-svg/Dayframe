@@ -12,8 +12,8 @@ const workoutPlan = [
 ];
 
 let user = null;
-let records = { workouts: [], tasks: [], water: [] };
-const defaultWorkSchedule = { shift_mode: 'day', start_time: '09:00:00', end_time: '17:00:00', working_days: [1, 2, 3, 4, 5] };
+let records = { workouts: [], tasks: [], water: [], budgetEntries: [], monthlyBudget: null };
+const defaultWorkSchedule = { shift_mode: 'day', start_time: '09:00:00', end_time: '17:00:00', recovery_minutes: 60, working_days: [1, 2, 3, 4, 5] };
 let workSchedule = { ...defaultWorkSchedule, working_days: [...defaultWorkSchedule.working_days] };
 let refreshTimer = null;
 let monthCursor = new Date();
@@ -61,6 +61,43 @@ function workingIntervals(date) {
   return intervals.sort((a, b) => a[0] - b[0]);
 }
 
+function workoutGuidance(date) {
+  const shiftStart = minutesAt(workSchedule.start_time);
+  const shiftEnd = minutesAt(workSchedule.end_time);
+  const rest = Number(workSchedule.recovery_minutes) || 0;
+  const days = new Set((workSchedule.working_days || []).map(Number));
+  const weekday = dayOfWeek(date);
+  const previousWorkday = days.has(dayOfWeek(dateAfter(date, -1)));
+  let restUntil = null;
+  let workoutTime = '09:00';
+
+  if (shiftStart < shiftEnd && days.has(weekday)) {
+    restUntil = shiftEnd + rest;
+  } else if (shiftStart > shiftEnd && shiftEnd > 0 && previousWorkday) {
+    restUntil = shiftEnd + rest;
+  } else if (shiftStart > shiftEnd && days.has(weekday)) {
+    workoutTime = clock(Math.max(0, Math.floor((shiftStart - 60) / 15) * 15));
+    return { workoutTime, restLabel: `Pre-shift workout · work starts ${timeLabel(workSchedule.start_time)}` };
+  }
+
+  if (restUntil !== null) {
+    if (restUntil >= 1440) return { workoutTime: '', restLabel: `REST · continue tomorrow ${clock(restUntil - 1440)}` };
+    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+    if (date === today() && nowMinutes > restUntil) {
+      workoutTime = clock(Math.ceil(nowMinutes / 15) * 15);
+      return { workoutTime, restLabel: `Recovery complete · workout from ${timeLabel(workoutTime)}` };
+    }
+    workoutTime = clock(restUntil);
+    return { workoutTime, restLabel: `REST · workout after ${timeLabel(workoutTime)}` };
+  }
+
+  if (date === today()) {
+    const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+    if (nowMinutes > minutesAt(workoutTime)) workoutTime = clock(Math.ceil(nowMinutes / 15) * 15);
+  }
+  return { workoutTime, restLabel: '' };
+}
+
 function taskStatus(task) {
   if (task.completed) return 'done';
   const currentDate = today();
@@ -70,6 +107,99 @@ function taskStatus(task) {
   const upcomingDates = [task.task_date, task.due_date].filter((date) => date && date > currentDate).sort();
   if (!upcomingDates.length) return 'unscheduled';
   return upcomingDates[0] <= dateAfter(currentDate, 7) ? 'soon' : 'upcoming';
+}
+
+function mountBudgetPlanner() {
+  if ($('budgetPanel')) return;
+  const panel = document.createElement('section');
+  panel.id = 'budgetPanel';
+  panel.className = 'panel';
+  panel.style.marginBottom = '14px';
+  panel.innerHTML = `
+    <div class="row"><h2>Monthly budget</h2><span id="budgetMonthLabel" class="pill"></span></div>
+    <form id="budgetLimitForm" class="budget-limit-form">
+      <div class="field"><label for="budgetLimit">Planned spending limit</label><input id="budgetLimit" type="number" min="0" step="0.01" required></div>
+      <button type="submit">Save limit</button>
+    </form>
+    <div class="budget-totals">
+      <div><span>Spent</span><strong id="budgetSpent">0.00</strong></div>
+      <div><span>Remaining</span><strong id="budgetRemaining">0.00</strong></div>
+      <div><span>Income</span><strong id="budgetIncome">0.00</strong></div>
+    </div>
+    <form id="budgetEntryForm" class="budget-entry-form">
+      <div class="fields">
+        <div class="field"><label for="budgetTitle">Item</label><input id="budgetTitle" maxlength="120" required placeholder="Rent, groceries, paycheck"></div>
+        <div class="field"><label for="budgetType">Type</label><select id="budgetType"><option value="expense">Expense</option><option value="income">Income</option></select></div>
+        <div class="field"><label for="budgetCategory">Category</label><select id="budgetCategory"><option>Housing</option><option>Food</option><option>Transport</option><option>Health</option><option>Utilities</option><option>Work</option><option>Fitness</option><option>Other</option></select></div>
+        <div class="field"><label for="budgetAmount">Amount</label><input id="budgetAmount" type="number" min="0.01" step="0.01" required></div>
+        <div class="field"><label for="budgetDate">Date</label><input id="budgetDate" type="date" required></div>
+      </div>
+      <button type="submit">Add budget entry</button><span id="budgetMessage" class="status" role="status"></span>
+    </form>
+    <div id="budgetEntries" class="budget-entries"></div>`;
+
+  const monthPanel = $('monthGrid').closest('section');
+  monthPanel.parentElement.insertBefore(panel, monthPanel);
+
+  $('budgetLimitForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const { error } = await supabase.from('monthly_budgets').upsert({
+      user_id: user.id,
+      budget_month: monthStart(),
+      spending_limit: Number($('budgetLimit').value) || 0,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id,budget_month' });
+    if (error) {
+      msg('budgetMessage', error.message);
+      return;
+    }
+    msg('budgetMessage', 'Monthly limit saved.');
+    await loadData();
+  };
+
+  $('budgetEntryForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const { error } = await supabase.from('budget_entries').insert({
+      user_id: user.id,
+      entry_date: $('budgetDate').value,
+      title: $('budgetTitle').value.trim(),
+      category: $('budgetCategory').value,
+      entry_type: $('budgetType').value,
+      amount: Number($('budgetAmount').value)
+    });
+    if (error) {
+      msg('budgetMessage', error.message);
+      return;
+    }
+    e.target.reset();
+    $('budgetDate').value = today();
+    msg('budgetMessage', 'Budget entry added.');
+    await loadData();
+  };
+
+  $('budgetDate').value = monthStart() <= today() && today() <= monthEnd() ? today() : monthStart();
+}
+
+function renderBudget() {
+  const entries = records.budgetEntries || [];
+  const limit = Number(records.monthlyBudget?.spending_limit) || 0;
+  const spent = entries.filter((entry) => entry.entry_type === 'expense').reduce((total, entry) => total + Number(entry.amount), 0);
+  const income = entries.filter((entry) => entry.entry_type === 'income').reduce((total, entry) => total + Number(entry.amount), 0);
+  const amountLabel = (value) => new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+
+  $('budgetMonthLabel').textContent = monthCursor.toLocaleDateString([], { month: 'long', year: 'numeric' });
+  $('budgetLimit').value = records.monthlyBudget ? limit.toFixed(2) : '';
+  $('budgetDate').value = monthStart() <= today() && today() <= monthEnd() ? today() : monthStart();
+  $('budgetSpent').textContent = amountLabel(spent);
+  $('budgetRemaining').textContent = amountLabel(limit - spent);
+  $('budgetRemaining').classList.toggle('over-budget', spent > limit);
+  $('budgetIncome').textContent = amountLabel(income);
+  $('budgetEntries').innerHTML = entries.slice().sort((a, b) => b.entry_date.localeCompare(a.entry_date) || b.created_at.localeCompare(a.created_at)).map((entry) => `
+    <div class="budget-entry ${entry.entry_type}">
+      <div><strong>${esc(entry.title)}</strong><small>${esc(entry.entry_date)} · ${esc(entry.category)}</small></div>
+      <b>${entry.entry_type === 'income' ? '+' : '−'}${amountLabel(Number(entry.amount))}</b>
+      <button type="button" class="outline" data-delete-budget="${entry.id}" aria-label="Delete ${esc(entry.title)}">×</button>
+    </div>`).join('') || '<p class="muted small">No entries for this month yet.</p>';
 }
 
 async function scheduleTasks(pending, { startDate, endDate, startAtNow = true } = {}) {
@@ -163,11 +293,40 @@ async function rescheduleRemainingTasks() {
   return scheduleTasks(sortedTasks(pending), { startDate: today(), endDate: dateAfter(today(), 89) });
 }
 
+async function syncWorkoutSchedule() {
+  const { data: existingWorkouts, error: loadError } = await supabase.from('workouts').select('*').eq('user_id', user.id).gte('workout_date', weekStart()).lte('workout_date', weekEnd());
+  if (loadError) throw loadError;
+
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = dateAfter(weekStart(), offset);
+    const plan = plannedWorkout(date);
+    if (date < today() || !plan) continue;
+    const existing = (existingWorkouts || []).find((workout) => workout.workout_date === date);
+    if (existing?.completed || existing?.is_skipped) continue;
+    const guidance = workoutGuidance(date);
+    if (!guidance.workoutTime && !existing) continue;
+    const startTime = guidance.workoutTime || null;
+    const { error } = await supabase.from('workouts').upsert({
+      id: existing?.id,
+      user_id: user.id,
+      workout_date: date,
+      workout_type: existing?.workout_type || plan.name,
+      completed: false,
+      start_time: startTime,
+      remind_at: startTime ? new Date(new Date(`${date}T${startTime}:00`).getTime() - 15 * 60 * 1000).toISOString() : null,
+      reminder_sent_at: null,
+      reminder_claimed_at: null,
+      is_skipped: false
+    }, { onConflict: 'user_id,workout_date' });
+    if (error) throw error;
+  }
+}
+
 function showEditor(kind, item, date) {
   $('editKind').value = kind;
   $('editId').value = item?.id || '';
-  $('editOriginalDate').value = date || item?.workout_date || '';
-  $('editHeading').textContent = kind === 'task' ? 'Edit task' : 'Edit workout';
+  $('editOriginalDate').value = date || item?.task_date || item?.workout_date || '';
+  $('editHeading').textContent = kind === 'task' ? (item ? 'Edit task' : 'Add task') : 'Edit workout';
   $('editTaskFields').classList.toggle('hidden', kind !== 'task');
   $('editWorkoutFields').classList.toggle('hidden', kind !== 'workout');
   $('editTaskTitle').required = kind === 'task';
@@ -176,14 +335,14 @@ function showEditor(kind, item, date) {
   msg('editMessage', '');
 
   if (kind === 'task') {
-    $('editTaskTitle').value = item.title;
-    $('editTaskDate').value = item.task_date || '';
-    $('editTaskDeadline').value = item.due_date || '';
-    $('editTaskTime').value = item.due_time || '';
-    $('editTaskDuration').value = item.duration_minutes || 60;
-    $('editTaskPriority').value = item.priority || 2;
-    $('editTaskFixed').value = String(Boolean(item.is_fixed));
-    $('editTaskCompleted').checked = Boolean(item.completed);
+    $('editTaskTitle').value = item?.title || '';
+    $('editTaskDate').value = item?.task_date || date || '';
+    $('editTaskDeadline').value = item?.due_date || '';
+    $('editTaskTime').value = item?.due_time || '';
+    $('editTaskDuration').value = item?.duration_minutes || 60;
+    $('editTaskPriority').value = item?.priority || 2;
+    $('editTaskFixed').value = String(Boolean(item?.is_fixed));
+    $('editTaskCompleted').checked = Boolean(item?.completed);
   } else {
     const workoutDate = date || item?.workout_date || today();
     const defaultWorkout = plannedWorkout(workoutDate);
@@ -257,6 +416,13 @@ function showAuth() {
 }
 
 function renderWorkSchedule() {
+  const scheduleFields = $('#workScheduleForm .fields');
+  if (!$('recoveryMinutes')) {
+    const recoveryField = document.createElement('div');
+    recoveryField.className = 'field';
+    recoveryField.innerHTML = '<label for="recoveryMinutes">Rest after work</label><select id="recoveryMinutes"><option value="0">No extra rest</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="90">1.5 hours</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option></select>';
+    scheduleFields.append(recoveryField);
+  }
   const daysOffFieldset = document.querySelector('#workScheduleForm fieldset');
   if (!daysOffFieldset.dataset.dayOffPicker) {
     const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -266,6 +432,7 @@ function renderWorkSchedule() {
   $('shiftMode').value = workSchedule.shift_mode;
   $('workStart').value = workSchedule.start_time.slice(0, 5);
   $('workEnd').value = workSchedule.end_time.slice(0, 5);
+  $('recoveryMinutes').value = String(workSchedule.recovery_minutes ?? 60);
   document.querySelectorAll('input[name="dayOff"]').forEach((input) => {
     input.checked = !(workSchedule.working_days || []).map(Number).includes(Number(input.value));
   });
@@ -273,7 +440,7 @@ function renderWorkSchedule() {
   const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const daysOff = weekdays.filter((_day, index) => !(workSchedule.working_days || []).map(Number).includes(index));
   const mode = workSchedule.shift_mode === 'custom' ? 'Custom hours' : `${workSchedule.shift_mode[0].toUpperCase()}${workSchedule.shift_mode.slice(1)} shift`;
-  $('workScheduleStatus').textContent = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)} · Days off: ${daysOff.length ? daysOff.join(', ') : 'none'}`;
+  $('workScheduleStatus').textContent = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)} · Rest ${workSchedule.recovery_minutes || 0}m · Days off: ${daysOff.length ? daysOff.join(', ') : 'none'}`;
   $('from').value = workSchedule.start_time.slice(0, 5);
   $('until').value = workSchedule.end_time.slice(0, 5);
 }
@@ -341,30 +508,37 @@ async function loadData() {
   if (!user) return;
 
   try {
-    const [workoutsRes, tasksRes, waterRes, scheduleRes] = await Promise.all([
+    const [workoutsRes, tasksRes, waterRes, scheduleRes, budgetEntriesRes, monthlyBudgetRes] = await Promise.all([
       supabase.from('workouts').select('*').eq('user_id', user.id).gte('workout_date', monthStart()).lte('workout_date', monthEnd()),
       supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at'),
       supabase.from('water_logs').select('*').eq('user_id', user.id).eq('log_date', today()),
-      supabase.from('work_schedules').select('*').eq('user_id', user.id).maybeSingle()
+      supabase.from('work_schedules').select('*').eq('user_id', user.id).maybeSingle(),
+      supabase.from('budget_entries').select('*').eq('user_id', user.id).gte('entry_date', monthStart()).lte('entry_date', monthEnd()),
+      supabase.from('monthly_budgets').select('*').eq('user_id', user.id).eq('budget_month', monthStart()).maybeSingle()
     ]);
 
     if (workoutsRes.error) throw workoutsRes.error;
     if (tasksRes.error) throw tasksRes.error;
     if (waterRes.error) throw waterRes.error;
     if (scheduleRes.error) throw scheduleRes.error;
+    if (budgetEntriesRes.error) throw budgetEntriesRes.error;
+    if (monthlyBudgetRes.error) throw monthlyBudgetRes.error;
 
     const savedSchedule = scheduleRes.data || defaultWorkSchedule;
     workSchedule = {
       shift_mode: savedSchedule.shift_mode || 'day',
       start_time: String(savedSchedule.start_time || defaultWorkSchedule.start_time).slice(0, 5),
       end_time: String(savedSchedule.end_time || defaultWorkSchedule.end_time).slice(0, 5),
+      recovery_minutes: Number(savedSchedule.recovery_minutes ?? defaultWorkSchedule.recovery_minutes),
       working_days: (savedSchedule.working_days || defaultWorkSchedule.working_days).map(Number)
     };
 
     records = {
       workouts: workoutsRes.data || [],
       tasks: tasksRes.data || [],
-      water: waterRes.data || []
+      water: waterRes.data || [],
+      budgetEntries: budgetEntriesRes.data || [],
+      monthlyBudget: monthlyBudgetRes.data || null
     };
 
     renderWorkSchedule();
@@ -434,7 +608,7 @@ function renderMonth() {
       const label = { overdue: 'Overdue', today: 'Today', soon: 'Soon', upcoming: 'Upcoming', unscheduled: 'Unscheduled', done: 'Done' }[status];
       return `<div class="calendar-task task-${status} ${task.is_fixed ? 'mfixed' : ''}"><input type="checkbox" data-task="${task.id}" ${task.completed ? 'checked' : ''} aria-label="Mark ${esc(task.title)} ${task.completed ? 'not done' : 'done'}"><button type="button" class="mtask-open" data-edit-task="${task.id}" title="Edit ${esc(task.title)}">${task.is_fixed ? '◆ ' : ''}${esc(task.title)}</button><span class="task-badge">${label}</span><button type="button" class="outline mtask-delete" data-remove="${task.id}" aria-label="Delete ${esc(task.title)}" title="Delete task">×</button></div>`;
     }).join('');
-    cell.innerHTML = `<div class="date">${day} <span class="calendar-day-name">${weekdays[dayOfWeek(date)]}</span></div><div class="calendar-hours">${esc(hoursLabel)}</div>${taskRows}`;
+    cell.innerHTML = `<div class="date">${day} <span class="calendar-day-name">${weekdays[dayOfWeek(date)]}</span><button type="button" class="calendar-add" data-add-task-date="${date}" aria-label="Add task on ${date}" title="Add task">+</button></div><div class="calendar-hours">${esc(hoursLabel)}</div>${taskRows}`;
     grid.append(cell);
   }
 
@@ -452,6 +626,7 @@ async function render() {
   const { data: tasks } = await supabase.from('tasks').select('*').eq('user_id', user.id).order('sort_order');
   records.tasks = tasks || [];
   renderMonth();
+  renderBudget();
 
   const wmap = new Map(records.workouts.map((w) => [w.workout_date, w]));
   const done = records.workouts.filter((w) => w.completed && !w.is_skipped && w.workout_date >= weekStart() && w.workout_date <= weekEnd()).length;
@@ -464,13 +639,16 @@ async function render() {
     const p = workoutPlan.find((x) => x.dow === d.getDay());
     const entry = wmap.get(date);
     const workoutName = entry?.is_skipped ? '' : (entry?.workout_type || p?.name || '');
+    const guidance = workoutGuidance(date);
+    const workoutTime = entry?.start_time || guidance.workoutTime;
     const el = document.createElement('div');
     el.className = 'day' + (date === today() ? ' today' : '') + (!p ? ' rest' : '');
     el.innerHTML = `
       <div class="dow">${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
       <b>${esc(workoutName || 'Rest / optional walk')}</b>
       <small>${workoutName ? (p ? '45–60 min' : 'Scheduled workout') : 'Recovery'}</small>
-      ${workoutName ? `<label><input type="checkbox" data-complete="${date}" ${entry?.completed ? 'checked' : ''}> Complete</label><input aria-label="Workout start time" type="time" data-start="${date}" value="${entry?.start_time || ''}">` : ''}
+      ${guidance.restLabel ? `<span class="recovery-pill">${esc(guidance.restLabel)}</span>` : ''}
+      ${workoutName ? `<label><input type="checkbox" data-complete="${date}" ${entry?.completed ? 'checked' : ''}> Complete</label><input aria-label="Workout start time" type="time" data-start="${date}" value="${workoutTime || ''}">` : ''}
       <div class="workout-actions"><button type="button" class="outline" data-edit-workout="${date}">Edit</button>${workoutName ? `<button type="button" class="outline" data-delete-workout="${date}">Delete</button>` : ''}</div>
     `;
     $('week').append(el);
@@ -587,6 +765,7 @@ $('workScheduleForm').onsubmit = async (e) => {
     shift_mode: $('shiftMode').value,
     start_time: startTime,
     end_time: endTime,
+    recovery_minutes: Number($('recoveryMinutes').value),
     working_days: [...document.querySelectorAll('input[name="dayOff"]:not(:checked)')].map((input) => Number(input.value)),
     updated_at: new Date().toISOString()
   };
@@ -599,6 +778,11 @@ $('workScheduleForm').onsubmit = async (e) => {
   workSchedule = { ...schedule, start_time: startTime, end_time: endTime };
   renderWorkSchedule();
   msg('workScheduleStatus', 'Saved. Updating your schedule…');
+  try {
+    await syncWorkoutSchedule();
+  } catch (error) {
+    msg('workScheduleStatus', `Saved, but workouts could not be updated: ${error.message}`);
+  }
   await autoPlanMonth(false);
   await loadData();
 };
@@ -662,6 +846,20 @@ document.addEventListener('click', async (e) => {
   const button = e.target.closest('button');
   if (!button) return;
 
+  if (button.dataset.addTaskDate) {
+    showEditor('task', null, button.dataset.addTaskDate);
+  }
+
+  if (button.dataset.deleteBudget) {
+    if (!confirm('Delete this budget entry?')) return;
+    const { error } = await supabase.from('budget_entries').delete().eq('id', button.dataset.deleteBudget).eq('user_id', user.id);
+    if (error) {
+      alert(error.message);
+      return;
+    }
+    await loadData();
+  }
+
   if (button.dataset.editTask) {
     const task = records.tasks.find((x) => x.id === button.dataset.editTask);
     if (task) showEditor('task', task);
@@ -717,7 +915,7 @@ $('editForm').onsubmit = async (e) => {
   e.preventDefault();
   try {
     if ($('editKind').value === 'task') {
-      const { error } = await supabase.from('tasks').update({
+      const taskChanges = {
         title: $('editTaskTitle').value.trim(),
         task_date: $('editTaskDate').value || null,
         due_date: $('editTaskDeadline').value || null,
@@ -726,7 +924,11 @@ $('editForm').onsubmit = async (e) => {
         priority: Number($('editTaskPriority').value) || 2,
         is_fixed: $('editTaskFixed').value === 'true',
         completed: $('editTaskCompleted').checked
-      }).eq('id', $('editId').value).eq('user_id', user.id);
+      };
+      const result = $('editId').value
+        ? await supabase.from('tasks').update(taskChanges).eq('id', $('editId').value).eq('user_id', user.id)
+        : await supabase.from('tasks').insert({ ...taskChanges, user_id: user.id, is_template: false });
+      const { error } = result;
       if (error) throw error;
     } else {
       await saveWorkout();
@@ -832,7 +1034,7 @@ $('enablePush').onclick = async () => {
 };
 
 $('export').onclick = async () => {
-  const tables = ['workouts', 'tasks', 'water_logs'];
+  const tables = ['workouts', 'tasks', 'water_logs', 'work_schedules', 'monthly_budgets', 'budget_entries'];
   const dump = {};
   for (const table of tables) {
     const { data, error } = await supabase.from(table).select('*').eq('user_id', user.id);
@@ -858,7 +1060,7 @@ $('backupFile').onchange = async (e) => {
 
   try {
     const json = JSON.parse(await file.text());
-    for (const table of ['workouts', 'tasks', 'water_logs']) {
+    for (const table of ['workouts', 'tasks', 'water_logs', 'work_schedules', 'monthly_budgets', 'budget_entries']) {
       if (!json[table]?.length) continue;
       const rows = json[table].map(({ id, created_at, ...rest }) => ({ ...rest, user_id: user.id }));
       const { error } = await supabase.from(table).upsert(rows);
@@ -870,6 +1072,8 @@ $('backupFile').onchange = async (e) => {
     alert('Import failed: ' + err.message);
   }
 };
+
+mountBudgetPlanner();
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(console.error);
