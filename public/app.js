@@ -13,6 +13,8 @@ const workoutPlan = [
 
 let user = null;
 let records = { workouts: [], tasks: [], water: [] };
+const defaultWorkSchedule = { shift_mode: 'day', start_time: '09:00:00', end_time: '17:00:00', working_days: [1, 2, 3, 4, 5] };
+let workSchedule = { ...defaultWorkSchedule, working_days: [...defaultWorkSchedule.working_days] };
 let refreshTimer = null;
 let monthCursor = new Date();
 monthCursor.setDate(1);
@@ -28,7 +30,7 @@ const monday = () => {
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const timeLabel = (t) => t ? new Date(`2000-01-01T${t}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-const clock = (n) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const clock = (n) => `${String(Math.floor(n / 60) % 24).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
 const plannedWorkout = (date) => workoutPlan.find((x) => x.dow === new Date(`${date}T12:00:00`).getDay());
 let rolloverInProgress = false;
 
@@ -36,6 +38,27 @@ function dateAfter(date, days) {
   const result = new Date(`${date}T12:00:00`);
   result.setDate(result.getDate() + days);
   return isoDate(result);
+}
+
+function minutesAt(time) {
+  return Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+}
+
+function dayOfWeek(date) {
+  return new Date(`${date}T12:00:00`).getDay();
+}
+
+function workingIntervals(date) {
+  const start = minutesAt(workSchedule.start_time);
+  const end = minutesAt(workSchedule.end_time);
+  const workingDays = new Set((workSchedule.working_days || []).map(Number));
+
+  if (start < end) return workingDays.has(dayOfWeek(date)) ? [[start, end]] : [];
+
+  const intervals = [];
+  if (workingDays.has(dayOfWeek(date)) && start < 1440) intervals.push([start, 1440]);
+  if (end > 0 && workingDays.has(dayOfWeek(dateAfter(date, -1)))) intervals.push([0, end]);
+  return intervals.sort((a, b) => a[0] - b[0]);
 }
 
 function taskStatus(task) {
@@ -49,6 +72,76 @@ function taskStatus(task) {
   return upcomingDates[0] <= dateAfter(currentDate, 7) ? 'soon' : 'upcoming';
 }
 
+async function scheduleTasks(pending, { startDate, endDate, startAtNow = true } = {}) {
+  const busy = new Map();
+  const pendingIds = new Set(pending.map((task) => task.id));
+  const durationFor = (task) => Math.max(15, Number(task.duration_minutes) || 60);
+  const reserve = (date, start, end) => {
+    if (!busy.has(date)) busy.set(date, []);
+    busy.get(date).push([start, end]);
+  };
+  const findSlot = (date, duration, earliest = 0) => {
+    const occupied = busy.get(date) || [];
+    for (const [windowStart, windowEnd] of workingIntervals(date)) {
+      const firstStart = Math.max(windowStart, earliest);
+      for (let start = firstStart; start + duration <= windowEnd; start += 15) {
+        if (!occupied.some(([otherStart, otherEnd]) => start < otherEnd && start + duration > otherStart)) {
+          return { date, start, end: start + duration };
+        }
+      }
+    }
+    return null;
+  };
+
+  for (const task of records.tasks) {
+    if (pendingIds.has(task.id) || task.is_template || task.completed || !task.task_date || task.task_date < startDate || task.task_date > endDate) continue;
+    const duration = durationFor(task);
+    if (task.due_time) {
+      const start = minutesAt(task.due_time);
+      const end = start + duration;
+      reserve(task.task_date, start, Math.min(end, 1440));
+      if (end > 1440) reserve(dateAfter(task.task_date, 1), 0, end - 1440);
+    } else if (task.is_fixed) {
+      const slot = findSlot(task.task_date, duration);
+      if (slot) reserve(slot.date, slot.start, slot.end);
+    }
+  }
+
+  const currentTime = new Date();
+  const nowMinutes = Math.ceil((currentTime.getHours() * 60 + currentTime.getMinutes()) / 15) * 15;
+  let moved = 0;
+  let failed = 0;
+
+  for (const task of pending) {
+    let slot = null;
+    for (let offset = 0; offset < 90 && !slot; offset += 1) {
+      const date = dateAfter(startDate, offset);
+      if (date > endDate) break;
+      const earliest = startAtNow && date === today() ? nowMinutes : 0;
+      slot = findSlot(date, durationFor(task), earliest);
+    }
+
+    if (!slot) {
+      failed += 1;
+      continue;
+    }
+
+    const { error } = await supabase.from('tasks').update({ task_date: slot.date, due_time: clock(slot.start) }).eq('id', task.id).eq('user_id', user.id);
+    if (error) {
+      failed += 1;
+      console.error('Unable to schedule task:', error);
+      continue;
+    }
+
+    task.task_date = slot.date;
+    task.due_time = clock(slot.start);
+    reserve(slot.date, slot.start, slot.end);
+    moved += 1;
+  }
+
+  return { moved, failed };
+}
+
 async function rollOverOverdueTasks() {
   if (!user || rolloverInProgress) return { moved: 0, failed: 0 };
   const pending = records.tasks
@@ -57,67 +150,17 @@ async function rollOverOverdueTasks() {
   if (!pending.length) return { moved: 0, failed: 0 };
 
   rolloverInProgress = true;
-  let moved = 0;
-  let failed = 0;
-  const busy = new Map();
-  const minutesFor = (value) => value ? Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5)) : 540;
-  const durationFor = (task) => Math.max(15, Number(task.duration_minutes) || 60);
-
-  for (const task of records.tasks) {
-    if (task.is_template || !task.task_date || task.task_date < today() || task.is_skipped) continue;
-    const start = minutesFor(task.due_time);
-    const end = start + durationFor(task);
-    if (start >= 1020 || end <= 540) continue;
-    if (!busy.has(task.task_date)) busy.set(task.task_date, []);
-    busy.get(task.task_date).push([start, end]);
-  }
-
-  const currentTime = new Date();
-  const currentMinutes = currentTime.getHours() * 60 + currentTime.getMinutes();
-
   try {
-    for (const task of pending) {
-      const duration = durationFor(task);
-      let slot = null;
-
-      for (let offset = 0; offset < 90 && !slot; offset += 1) {
-        const date = dateAfter(today(), offset);
-        const weekday = new Date(`${date}T12:00:00`).getDay();
-        if (weekday === 0 || weekday === 6) continue;
-
-        const earliest = offset === 0 ? Math.max(540, Math.ceil(currentMinutes / 15) * 15) : 540;
-        const occupied = busy.get(date) || [];
-        for (let start = earliest; start + duration <= 1020; start += 15) {
-          if (!occupied.some(([otherStart, otherEnd]) => start < otherEnd && start + duration > otherStart)) {
-            slot = { date, start, end: start + duration };
-            break;
-          }
-        }
-      }
-
-      if (!slot) {
-        failed += 1;
-        continue;
-      }
-
-      const { error } = await supabase.from('tasks').update({ task_date: slot.date, due_time: clock(slot.start) }).eq('id', task.id).eq('user_id', user.id);
-      if (error) {
-        failed += 1;
-        console.error('Unable to roll over task:', error);
-        continue;
-      }
-
-      task.task_date = slot.date;
-      task.due_time = clock(slot.start);
-      if (!busy.has(slot.date)) busy.set(slot.date, []);
-      busy.get(slot.date).push([slot.start, slot.end]);
-      moved += 1;
-    }
+    return await scheduleTasks(pending, { startDate: today(), endDate: dateAfter(today(), 89) });
   } finally {
     rolloverInProgress = false;
   }
+}
 
-  return { moved, failed };
+async function rescheduleRemainingTasks() {
+  const pending = records.tasks.filter((task) => !task.is_template && !task.completed && !task.is_fixed && task.task_date === today());
+  if (!pending.length) return { moved: 0, failed: 0 };
+  return scheduleTasks(sortedTasks(pending), { startDate: today(), endDate: dateAfter(today(), 89) });
 }
 
 function showEditor(kind, item, date) {
@@ -213,6 +256,22 @@ function showAuth() {
   $('account').textContent = 'Not signed in';
 }
 
+function renderWorkSchedule() {
+  $('shiftMode').value = workSchedule.shift_mode;
+  $('workStart').value = workSchedule.start_time.slice(0, 5);
+  $('workEnd').value = workSchedule.end_time.slice(0, 5);
+  document.querySelectorAll('input[name="workingDay"]').forEach((input) => {
+    input.checked = (workSchedule.working_days || []).map(Number).includes(Number(input.value));
+  });
+
+  const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const days = (workSchedule.working_days || []).map(Number).sort((a, b) => a - b).map((day) => weekdays[day]);
+  const mode = workSchedule.shift_mode === 'custom' ? 'Custom hours' : `${workSchedule.shift_mode[0].toUpperCase()}${workSchedule.shift_mode.slice(1)} shift`;
+  $('workScheduleStatus').textContent = `${mode} · ${timeLabel(workSchedule.start_time)}–${timeLabel(workSchedule.end_time)} · ${days.length ? days.join(', ') : 'Every day off'}`;
+  $('from').value = workSchedule.start_time.slice(0, 5);
+  $('until').value = workSchedule.end_time.slice(0, 5);
+}
+
 async function showApp() {
   $('authView')?.classList.add('hidden');
   $('appView')?.classList.remove('hidden');
@@ -276,15 +335,25 @@ async function loadData() {
   if (!user) return;
 
   try {
-    const [workoutsRes, tasksRes, waterRes] = await Promise.all([
+    const [workoutsRes, tasksRes, waterRes, scheduleRes] = await Promise.all([
       supabase.from('workouts').select('*').eq('user_id', user.id).gte('workout_date', monthStart()).lte('workout_date', monthEnd()),
       supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at'),
-      supabase.from('water_logs').select('*').eq('user_id', user.id).eq('log_date', today())
+      supabase.from('water_logs').select('*').eq('user_id', user.id).eq('log_date', today()),
+      supabase.from('work_schedules').select('*').eq('user_id', user.id).maybeSingle()
     ]);
 
     if (workoutsRes.error) throw workoutsRes.error;
     if (tasksRes.error) throw tasksRes.error;
     if (waterRes.error) throw waterRes.error;
+    if (scheduleRes.error) throw scheduleRes.error;
+
+    const savedSchedule = scheduleRes.data || defaultWorkSchedule;
+    workSchedule = {
+      shift_mode: savedSchedule.shift_mode || 'day',
+      start_time: String(savedSchedule.start_time || defaultWorkSchedule.start_time).slice(0, 5),
+      end_time: String(savedSchedule.end_time || defaultWorkSchedule.end_time).slice(0, 5),
+      working_days: (savedSchedule.working_days || defaultWorkSchedule.working_days).map(Number)
+    };
 
     records = {
       workouts: workoutsRes.data || [],
@@ -292,6 +361,7 @@ async function loadData() {
       water: waterRes.data || []
     };
 
+    renderWorkSchedule();
     const rollover = await rollOverOverdueTasks();
     await render();
     if (rollover.moved || rollover.failed) {
@@ -458,61 +528,64 @@ $('monthNext').onclick = async () => {
   await loadData();
 };
 
-$('generateMonth').onclick = async () => {
-  if (!user) return;
-  const start = new Date(monthCursor.getFullYear(), monthCursor.getMonth(), 1);
-  const end = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0);
+function sortedTasks(tasks) {
+  return tasks.sort((a, b) => (a.priority || 2) - (b.priority || 2) || (a.due_date || '9999').localeCompare(b.due_date || '9999'));
+}
 
+async function autoPlanMonth(reload = true) {
+  if (!user) return { moved: 0, failed: 0 };
   let pending = records.tasks.filter((t) => !t.is_template && !t.completed && !t.is_fixed && !t.task_date);
   pending = pending.concat(records.tasks.filter((t) => !t.is_template && !t.completed && !t.is_fixed && t.task_date >= monthStart() && t.task_date <= monthEnd()));
-  pending = [...new Map(pending.map((t) => [t.id, t])).values()].sort((a, b) => (a.priority || 2) - (b.priority || 2) || (a.due_date || '9999').localeCompare(b.due_date || '9999'));
+  pending = sortedTasks([...new Map(pending.map((t) => [t.id, t])).values()]);
 
-  const fixed = records.tasks.filter((t) => !t.is_template && t.is_fixed && t.task_date >= monthStart() && t.task_date <= monthEnd());
-  const slots = [];
+  const startDate = monthStart() < today() ? today() : monthStart();
+  const result = await scheduleTasks(pending, { startDate, endDate: monthEnd() });
+  $('monthStatus').textContent = `Scheduled ${result.moved} task(s) within your work hours${result.failed ? `; ${result.failed} task(s) need more available time` : ''}. Fixed appointments were preserved.`;
+  if (reload) await loadData();
+  return result;
+}
 
-  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-    if ([0, 6].includes(d.getDay())) continue;
-    const date = isoDate(d);
-    let cursor = 9 * 60;
-    const dayFixed = fixed.filter((t) => t.task_date === date).sort((a, b) => (a.due_time || '').localeCompare(b.due_time || ''));
+$('shiftMode').onchange = () => {
+  if ($('shiftMode').value === 'day') {
+    $('workStart').value = '09:00';
+    $('workEnd').value = '17:00';
+  } else if ($('shiftMode').value === 'night') {
+    $('workStart').value = '21:00';
+    $('workEnd').value = '05:00';
+  }
+};
 
-    for (const f of dayFixed) {
-      const fs = f.due_time ? Number(f.due_time.slice(0, 2)) * 60 + Number(f.due_time.slice(3, 5)) : cursor;
-      if (fs > cursor) slots.push({ date, start: cursor, end: fs });
-      cursor = Math.max(cursor, fs + (f.duration_minutes || 60));
-    }
-
-    if (cursor < 17 * 60) slots.push({ date, start: cursor, end: 17 * 60 });
+$('workScheduleForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const startTime = $('workStart').value;
+  const endTime = $('workEnd').value;
+  if (!startTime || !endTime || startTime === endTime) {
+    msg('workScheduleStatus', 'Choose different start and end times.');
+    return;
   }
 
-  const updates = [];
-  const unplaced = [];
-
-  for (const t of pending) {
-    const dur = Math.max(15, Number(t.duration_minutes) || 60);
-    const idx = slots.findIndex((s) => s.end - s.start >= dur);
-    if (idx < 0) {
-      unplaced.push(t.title);
-      continue;
-    }
-
-    const s = slots[idx];
-    updates.push({ id: t.id, task_date: s.date, due_time: clock(s.start), user_id: user.id });
-    s.start += dur;
-    if (s.start >= s.end) slots.splice(idx, 1);
+  const schedule = {
+    user_id: user.id,
+    shift_mode: $('shiftMode').value,
+    start_time: startTime,
+    end_time: endTime,
+    working_days: [...document.querySelectorAll('input[name="workingDay"]:checked')].map((input) => Number(input.value)),
+    updated_at: new Date().toISOString()
+  };
+  const { error } = await supabase.from('work_schedules').upsert(schedule, { onConflict: 'user_id' });
+  if (error) {
+    msg('workScheduleStatus', error.message);
+    return;
   }
 
-  for (const u of updates) {
-    const { error } = await supabase.from('tasks').update({ task_date: u.task_date, due_time: u.due_time }).eq('id', u.id).eq('user_id', user.id);
-    if (error) {
-      $('monthStatus').textContent = 'Could not save schedule: ' + error.message;
-      return;
-    }
-  }
-
-  $('monthStatus').textContent = `Scheduled ${updates.length} task(s) across weekdays${unplaced.length ? `; ${unplaced.length} task(s) need more time: ${unplaced.join(', ')}` : '. Fixed appointments were preserved.'}`;
+  workSchedule = { ...schedule, start_time: startTime, end_time: endTime };
+  renderWorkSchedule();
+  msg('workScheduleStatus', 'Saved. Updating your schedule…');
+  await autoPlanMonth(false);
   await loadData();
 };
+
+$('generateMonth').onclick = async () => autoPlanMonth();
 
 document.addEventListener('change', async (e) => {
   if (e.target.dataset.complete) {
@@ -557,6 +630,13 @@ document.addEventListener('change', async (e) => {
       return;
     }
     await loadData();
+    if (e.target.checked) {
+      const result = await rescheduleRemainingTasks();
+      await loadData();
+      if (result.moved || result.failed) {
+        $('monthStatus').textContent = `${result.moved} remaining task(s) rescheduled from now${result.failed ? `; ${result.failed} need more work time` : ''}.`;
+      }
+    }
   }
 });
 
@@ -676,24 +756,26 @@ $('planner').onsubmit = (e) => {
 
   const out = $('planResult');
   out.classList.remove('hidden');
-  if (b <= a) {
-    out.textContent = 'Please choose an end time after the start time.';
+  if (b === a) {
+    out.textContent = 'Choose different start and end times.';
     return;
   }
+  if (b < a) b += 24 * 60;
 
   const tasks = records.tasks.filter((t) => !t.completed);
   const todayWorkout = workoutPlan.find((x) => x.dow === new Date().getDay());
   const parts = [];
   let cursor = a;
+  const planClock = (time) => `${clock(time)}${time >= 1440 ? ' (next day)' : ''}`;
 
   if (todayWorkout && b - a >= 60) {
-    parts.push(`Workout · ${clock(cursor)}–${clock(cursor + 60)}`);
+    parts.push(`Workout · ${planClock(cursor)}–${planClock(cursor + 60)}`);
     cursor += 70;
   }
 
   for (const t of tasks.slice(0, 3)) {
     if (cursor + 30 > b) break;
-    parts.push(`${t.title} · ${clock(cursor)}–${clock(cursor + 30)}`);
+    parts.push(`${t.title} · ${planClock(cursor)}–${planClock(cursor + 30)}`);
     cursor += 35;
   }
 

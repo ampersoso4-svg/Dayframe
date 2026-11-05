@@ -7,7 +7,12 @@ Dayframe is an installable, responsive web app with Supabase account authenticat
 - Per-user database with Row Level Security
 - Weekly five-day workout plan, completion, start times and progress
 - Daily top-three priorities, custom tasks, hydration logs and evening review
-- Monthly work calendar with month navigation and automatic weekday scheduling\n- Task duration, priority, fixed appointment protection, and optional work dates\n- Month scheduling defaults to weekdays 09:00–17:00 and preserves fixed appointments\n- Basic smart schedule suggestions based on available hours
+- Monthly work calendar with month navigation and automatic task scheduling
+- Configurable day, night, or custom work hours, including selectable workdays and days off
+- Task duration, priority, fixed appointment protection, and optional work dates
+- Pending and upcoming task highlights with completion controls in the calendar
+- Automatic rollover and schedule reflow for unfinished tasks
+- Basic smart schedule suggestions based on available hours
 - PWA manifest and service worker for receiving web push
 - JSON backup export/import
 
@@ -55,7 +60,9 @@ Open the HTTPS deployment on each device. On supported browsers choose “Instal
 The planner is a deterministic time-slot suggestion tool, not an LLM integration. It does not read external calendars. It schedules against the availability window you enter. There is no Google Calendar dependency.
 
 ## Monthly scheduling update
-The monthly planner distributes unscheduled or movable incomplete tasks across weekdays (09:00–17:00), ordered by priority. Tasks marked as fixed appointments are not moved and reserve their duration on the assigned date. Tasks can be assigned a work date, duration, priority, and fixed status in the task form. The planner does not silently delete tasks; tasks that do not fit remain unscheduled and are reported.
+The monthly planner distributes unscheduled or movable incomplete tasks within the work hours and workdays saved for the account. Day, night, and custom shifts are supported, including shifts that cross midnight. Tasks are ordered by priority and deadline; fixed appointments are preserved. When a task is completed, remaining movable tasks are rescheduled from the current time. Tasks that do not fit remain unscheduled and are reported.
+
+For existing Supabase projects, run the updated `supabase/schema.sql` to add the per-user `work_schedules` table and its row-level security policy before deploying.
 
 ## Pending task handling
-Calendar tasks are highlighted as overdue, due today, coming soon, or completed. Unfinished movable tasks with a past work date are automatically shifted to the next available weekday slot between 09:00 and 17:00. Fixed appointments are not shifted, deadlines are preserved, and all calendar tasks can be marked complete or reopened directly from their calendar entry.
+Calendar tasks are highlighted as overdue, due today, coming soon, or completed. Unfinished movable tasks with a past work date are automatically shifted to the next available slot within the saved schedule. Fixed appointments are not shifted, deadlines are preserved, and all calendar tasks can be marked complete or reopened directly from their calendar entry.
