@@ -29,6 +29,89 @@ const monday = () => {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const timeLabel = (t) => t ? new Date(`2000-01-01T${t}`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 const clock = (n) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const plannedWorkout = (date) => workoutPlan.find((x) => x.dow === new Date(`${date}T12:00:00`).getDay());
+
+function showEditor(kind, item, date) {
+  $('editKind').value = kind;
+  $('editId').value = item?.id || '';
+  $('editOriginalDate').value = date || item?.workout_date || '';
+  $('editHeading').textContent = kind === 'task' ? 'Edit task' : 'Edit workout';
+  $('editTaskFields').classList.toggle('hidden', kind !== 'task');
+  $('editWorkoutFields').classList.toggle('hidden', kind !== 'workout');
+  $('editTaskTitle').required = kind === 'task';
+  $('editWorkoutTitle').required = kind === 'workout';
+  $('editWorkoutDate').required = kind === 'workout';
+  msg('editMessage', '');
+
+  if (kind === 'task') {
+    $('editTaskTitle').value = item.title;
+    $('editTaskDate').value = item.task_date || '';
+    $('editTaskDeadline').value = item.due_date || '';
+    $('editTaskTime').value = item.due_time || '';
+    $('editTaskDuration').value = item.duration_minutes || 60;
+    $('editTaskPriority').value = item.priority || 2;
+    $('editTaskFixed').value = String(Boolean(item.is_fixed));
+    $('editTaskCompleted').checked = Boolean(item.completed);
+  } else {
+    const workoutDate = date || item?.workout_date || today();
+    const defaultWorkout = plannedWorkout(workoutDate);
+    $('editWorkoutTitle').value = item?.is_skipped ? (defaultWorkout?.name || '') : (item?.workout_type || defaultWorkout?.name || 'Workout');
+    $('editWorkoutDate').value = workoutDate;
+    $('editWorkoutTime').value = item?.start_time || '';
+    $('editWorkoutCompleted').checked = Boolean(item?.completed);
+  }
+
+  $('editDialog').showModal();
+}
+
+async function saveWorkout() {
+  const originalDate = $('editOriginalDate').value;
+  const workoutDate = $('editWorkoutDate').value;
+  const title = $('editWorkoutTitle').value.trim();
+  const startTime = $('editWorkoutTime').value || null;
+  const completed = $('editWorkoutCompleted').checked;
+  if (!title || !workoutDate) throw new Error('Workout and date are required.');
+
+  const original = records.workouts.find((x) => x.id === $('editId').value);
+  const destination = records.workouts.find((x) => x.workout_date === workoutDate && x.id !== original?.id);
+  if (destination) throw new Error('There is already a workout on that date. Choose another date.');
+
+  const { error } = await supabase.from('workouts').upsert({
+    id: workoutDate === originalDate ? original?.id : undefined,
+    user_id: user.id,
+    workout_date: workoutDate,
+    workout_type: title,
+    completed,
+    start_time: startTime,
+    remind_at: startTime ? new Date(new Date(`${workoutDate}T${startTime}:00`).getTime() - 15 * 60 * 1000).toISOString() : null,
+    reminder_sent_at: null,
+    reminder_claimed_at: null,
+    is_skipped: false
+  }, { onConflict: 'user_id,workout_date' });
+  if (error) throw error;
+
+  if (workoutDate !== originalDate) {
+    const oldEntry = original || records.workouts.find((x) => x.workout_date === originalDate);
+    if (plannedWorkout(originalDate)) {
+      const { error: skipError } = await supabase.from('workouts').upsert({
+        id: oldEntry?.id,
+        user_id: user.id,
+        workout_date: originalDate,
+        workout_type: oldEntry?.workout_type || plannedWorkout(originalDate).name,
+        completed: false,
+        start_time: null,
+        remind_at: null,
+        reminder_sent_at: null,
+        reminder_claimed_at: null,
+        is_skipped: true
+      }, { onConflict: 'user_id,workout_date' });
+      if (skipError) throw skipError;
+    } else if (oldEntry) {
+      const { error: deleteError } = await supabase.from('workouts').delete().eq('id', oldEntry.id).eq('user_id', user.id);
+      if (deleteError) throw deleteError;
+    }
+  }
+}
 
 function msg(id, text) {
   const el = $(id);
@@ -163,7 +246,7 @@ function renderMonth() {
     const cell = document.createElement('div');
     cell.className = 'monthcell' + (date === today() ? ' today' : '');
     const items = records.tasks.filter((t) => !t.is_template && t.task_date === date);
-    cell.innerHTML = `<div class="date">${day}</div>` + items.slice(0, 4).map((t) => `<span class="mtask ${t.is_fixed ? 'mfixed' : ''}" title="${esc(t.title)}">${t.is_fixed ? '◆ ' : ''}${esc(t.title)}</span>`).join('') + (items.length > 4 ? `<small>+${items.length - 4} more</small>` : '');
+    cell.innerHTML = `<div class="date">${day}</div>` + items.slice(0, 4).map((t) => `<span class="mtask-row ${t.is_fixed ? 'mfixed' : ''}"><button type="button" class="mtask-open" data-edit-task="${t.id}" title="Edit ${esc(t.title)}">${t.is_fixed ? '◆ ' : ''}${esc(t.title)}</button><button type="button" class="outline mtask-delete" data-remove="${t.id}" aria-label="Delete ${esc(t.title)}" title="Delete task">×</button></span>`).join('') + (items.length > 4 ? `<small>+${items.length - 4} more</small>` : '');
     grid.append(cell);
   }
 }
@@ -175,7 +258,7 @@ async function render() {
   renderMonth();
 
   const wmap = new Map(records.workouts.map((w) => [w.workout_date, w]));
-  const done = records.workouts.filter((w) => w.completed && w.workout_date >= weekStart() && w.workout_date <= weekEnd()).length;
+  const done = records.workouts.filter((w) => w.completed && !w.is_skipped && w.workout_date >= weekStart() && w.workout_date <= weekEnd()).length;
 
   $('week').innerHTML = '';
   for (let i = 0; i < 7; i += 1) {
@@ -184,13 +267,15 @@ async function render() {
     const date = isoDate(d);
     const p = workoutPlan.find((x) => x.dow === d.getDay());
     const entry = wmap.get(date);
+    const workoutName = entry?.is_skipped ? '' : (entry?.workout_type || p?.name || '');
     const el = document.createElement('div');
     el.className = 'day' + (date === today() ? ' today' : '') + (!p ? ' rest' : '');
     el.innerHTML = `
       <div class="dow">${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
-      <b>${p?.name || 'Rest / optional walk'}</b>
-      <small>${p ? '45–60 min' : 'Recovery'}</small>
-      ${p ? `<label><input type="checkbox" data-complete="${date}" ${entry?.completed ? 'checked' : ''}> Complete</label><input aria-label="Workout start time" type="time" data-start="${date}" value="${entry?.start_time || ''}">` : ''}
+      <b>${esc(workoutName || 'Rest / optional walk')}</b>
+      <small>${workoutName ? (p ? '45–60 min' : 'Scheduled workout') : 'Recovery'}</small>
+      ${workoutName ? `<label><input type="checkbox" data-complete="${date}" ${entry?.completed ? 'checked' : ''}> Complete</label><input aria-label="Workout start time" type="time" data-start="${date}" value="${entry?.start_time || ''}">` : ''}
+      <div class="workout-actions"><button type="button" class="outline" data-edit-workout="${date}">Edit</button>${workoutName ? `<button type="button" class="outline" data-delete-workout="${date}">Delete</button>` : ''}</div>
     `;
     $('week').append(el);
   }
@@ -221,7 +306,7 @@ async function render() {
     <div class="item ${x.completed ? 'done' : ''}">
       <input type="checkbox" data-task="${x.id}" ${x.completed ? 'checked' : ''}>
       <div class="body">${esc(x.title)}${x.due_time ? `<small>Due ${timeLabel(x.due_time)}</small>` : ''}</div>
-      ${!x.is_template ? `<button class="outline" data-remove="${x.id}" style="padding:4px 8px">×</button>` : ''}
+      ${!x.is_template ? `<div class="item-actions"><button type="button" class="outline" data-edit-task="${x.id}">Edit</button><button type="button" class="outline" data-remove="${x.id}" aria-label="Delete ${esc(x.title)}">Delete</button></div>` : ''}
     </div>
   `).join('');
 
@@ -329,9 +414,10 @@ document.addEventListener('change', async (e) => {
       id: existing?.id,
       user_id: user.id,
       workout_date: date,
-      workout_type: workoutPlan.find((x) => x.dow === new Date(date + 'T12:00:00').getDay())?.name || 'Workout',
+      workout_type: existing?.workout_type || plannedWorkout(date)?.name || 'Workout',
       completed: e.target.checked,
-      start_time: existing?.start_time || null
+      start_time: existing?.start_time || null,
+      is_skipped: false
     }, { onConflict: 'user_id,workout_date' });
     await loadData();
   }
@@ -344,12 +430,13 @@ document.addEventListener('change', async (e) => {
       id: existing?.id,
       user_id: user.id,
       workout_date: date,
-      workout_type: workoutPlan.find((x) => x.dow === new Date(date + 'T12:00:00').getDay())?.name || 'Workout',
+      workout_type: existing?.workout_type || plannedWorkout(date)?.name || 'Workout',
       completed: existing?.completed || false,
       start_time: time || null,
       remind_at: time ? new Date(new Date(`${date}T${time}:00`).getTime() - 15 * 60 * 1000).toISOString() : null,
       reminder_sent_at: null,
-      reminder_claimed_at: null
+      reminder_claimed_at: null,
+      is_skipped: false
     }, { onConflict: 'user_id,workout_date' });
     await loadData();
   }
@@ -361,11 +448,84 @@ document.addEventListener('change', async (e) => {
 });
 
 document.addEventListener('click', async (e) => {
-  if (e.target.dataset.remove) {
-    await supabase.from('tasks').delete().eq('id', e.target.dataset.remove).eq('user_id', user.id);
+  const button = e.target.closest('button');
+  if (!button) return;
+
+  if (button.dataset.editTask) {
+    const task = records.tasks.find((x) => x.id === button.dataset.editTask);
+    if (task) showEditor('task', task);
+  }
+
+  if (button.dataset.editWorkout) {
+    const date = button.dataset.editWorkout;
+    showEditor('workout', records.workouts.find((x) => x.workout_date === date), date);
+  }
+
+  if (button.dataset.remove) {
+    if (!confirm('Delete this task?')) return;
+    const { error } = await supabase.from('tasks').delete().eq('id', button.dataset.remove).eq('user_id', user.id);
+    if (error) {
+      alert(error.message);
+      return;
+    }
+    await loadData();
+  }
+
+  if (button.dataset.deleteWorkout) {
+    if (!confirm('Remove this workout from the calendar?')) return;
+    const date = button.dataset.deleteWorkout;
+    const entry = records.workouts.find((x) => x.workout_date === date);
+    let result;
+    if (plannedWorkout(date)) {
+      result = await supabase.from('workouts').upsert({
+        id: entry?.id,
+        user_id: user.id,
+        workout_date: date,
+        workout_type: entry?.workout_type || plannedWorkout(date).name,
+        completed: false,
+        start_time: null,
+        remind_at: null,
+        reminder_sent_at: null,
+        reminder_claimed_at: null,
+        is_skipped: true
+      }, { onConflict: 'user_id,workout_date' });
+    } else if (entry) {
+      result = await supabase.from('workouts').delete().eq('id', entry.id).eq('user_id', user.id);
+    }
+    if (result?.error) {
+      alert(result.error.message);
+      return;
+    }
     await loadData();
   }
 });
+
+$('cancelEdit').onclick = () => $('editDialog').close();
+
+$('editForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    if ($('editKind').value === 'task') {
+      const { error } = await supabase.from('tasks').update({
+        title: $('editTaskTitle').value.trim(),
+        task_date: $('editTaskDate').value || null,
+        due_date: $('editTaskDeadline').value || null,
+        due_time: $('editTaskTime').value || null,
+        duration_minutes: Number($('editTaskDuration').value) || 60,
+        priority: Number($('editTaskPriority').value) || 2,
+        is_fixed: $('editTaskFixed').value === 'true',
+        completed: $('editTaskCompleted').checked
+      }).eq('id', $('editId').value).eq('user_id', user.id);
+      if (error) throw error;
+    } else {
+      await saveWorkout();
+    }
+    $('editDialog').close();
+    await loadData();
+  } catch (error) {
+    msg('editMessage', error.message || 'Unable to save changes.');
+  }
+};
 
 $('addTask').onsubmit = async (e) => {
   e.preventDefault();

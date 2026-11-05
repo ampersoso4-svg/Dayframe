@@ -4,7 +4,7 @@ create table if not exists public.workouts (
  id uuid primary key default gen_random_uuid(), user_id uuid not null references auth.users(id) on delete cascade,
  workout_date date not null, workout_type text not null, completed boolean not null default false,
  start_time time, remind_at timestamptz, reminder_sent_at timestamptz,
- created_at timestamptz not null default now(), unique(user_id,workout_date)
+ created_at timestamptz not null default now(), is_skipped boolean not null default false, unique(user_id,workout_date)
 );
 create table if not exists public.tasks (
  id uuid primary key default gen_random_uuid(), user_id uuid not null references auth.users(id) on delete cascade,
@@ -48,3 +48,4 @@ alter table public.tasks add column if not exists due_date date;
 
 -- Required by the browser when a workout reminder is scheduled.
 alter table public.workouts add column if not exists reminder_claimed_at timestamptz;
+alter table public.workouts add column if not exists is_skipped boolean not null default false;

@@ -14,6 +14,7 @@ Dayframe is an installable, responsive web app with Supabase account authenticat
 ## 1. Create Supabase project
 1. Create a project at https://supabase.com.
 2. Open SQL Editor and run `supabase/schema.sql`.
+	For an existing Dayframe project, run the updated schema again before deploying; its `add column if not exists` statements add new fields safely.
 3. In Project Settings → API, copy the Project URL and anon/publishable key.
 4. For Netlify, add `SUPABASE_URL` and `SUPABASE_ANON_KEY` under Site configuration → Environment variables. The included build script generates `public/config.js` automatically. Set `VAPID_PUBLIC_KEY` only if you have configured push.
 5. In Authentication → URL Configuration, add your eventual deployment URL to Site URL and Redirect URLs.
