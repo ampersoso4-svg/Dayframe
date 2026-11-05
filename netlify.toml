@@ -1,0 +1,6 @@
+[build]
+  command = "node scripts/write-config.mjs"
+  publish = "public"
+
+[build.environment]
+  NODE_VERSION = "20"
